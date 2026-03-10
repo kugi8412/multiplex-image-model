@@ -1,0 +1,68 @@
+encoder:
+    # marker-agnostic part (puste, DINO preferuje surowe obrazy)
+    ma_layers_blocks: []
+    ma_embedding_dims: []
+    
+    # pan-marker part - DINOv3 (sztuczna lista do oszukania scaling_factor na 16)
+    pm_layers_blocks: [1, 1, 1, 1, 1] 
+    pm_embedding_dims: [512, 512, 512, 512, 512] 
+    
+    # Architecture type with DINO wrapper parameters
+    encoder_type:
+      type: dino
+      module_parameters:
+        version: "v3"
+        model_size: "small" # daje nam 384 embed_dim
+        freeze_backbone: true # Zalecane przy transfer learningu
+        target_dim: 512 # Projektuje z 384 na 512, aby pasowało do Twojego wymiaru latent!
+
+    hyperkernel:
+      kernel_size: 1
+      padding: 0
+      stride: 1
+      use_bias: true
+
+decoder:
+  decoded_embed_dim: 384
+  num_blocks: 1
+  
+  block_type:
+    type: vit
+    module_parameters:
+       num_heads: 8
+
+  hyperkernel:
+      kernel_size: 1
+      padding: 0
+      stride: 1
+      use_bias: true
+
+# Data configuration
+panel_config: configs/all_panels_config.yaml
+tokenizer_config: configs/all_markers_tokenizer.yaml
+input_image_size: [128, 128] # Musi być podzielne przez 16! (128/16 = 8)
+num_workers: 8
+batch_size: 8
+
+# Training configuration
+device: cuda
+lr: 1e-4 # Transfer learning zazwyczaj wymaga mniejszego learning rate!
+final_lr: 1e-5
+weight_decay: 0.0001
+gradient_accumulation_steps: 1
+epochs: 10
+frac_warmup_steps: 0.1
+min_channels_frac: 0.75
+spatial_masking_ratio: 0.6
+fully_masked_channels_max_frac: 0.5
+mask_patch_size: 16 # Dopasowane do patch_size DINOv3
+from_checkpoint: null
+checkpoints_dir: checkpoints
+save_checkpoint_freq: 5
+beta: 0.5
+
+# Comet.ml logging
+tags: ["dinov3", "foundation-model", "transfer-learning"]
+comet_project: "immu-vis"
+comet_workspace: "kugi8412"
+comet_api_key: "V6s4QJ97ca130GE8M4G4MlU5D"
