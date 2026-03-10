@@ -16,21 +16,22 @@ class DinoEncoder(Encoder):
     Adapts isotropic ViT outputs to spatial feature maps [B, C, H, W]
     and optionally projects the embedding dimension to a target size.
     """
+    print("!!! Wczytano NOWĄ wersję DinoEncoder !!!")
 
     def __init__(
         self,
-        version: str = "v3",        # Wybór: "v2" lub "v3"
-        model_size: str = "small",  # Wybór: "small", "base", "large"
+        input_channels: int = 1,    # Zmienione z 'in_channels' aby pasowało do MultiplexImageEncoder
+        version: str = "v3",        
+        model_size: str = "base",  
         freeze_backbone: bool = False,
-        in_channels: int = 1,
         target_dim: int | None = None,
+        **kwargs,                   # Wyłapuje i ignoruje resztę argumentów (layers_blocks, embedding_dims, stem)
     ):
         super().__init__()
         
         if timm is None:
             raise ImportError("Biblioteka 'timm' jest wymagana do użycia DinoEncoder. Zainstaluj ją: pip install timm")
 
-        # Rejestr nazw modeli w timm dla obu generacji
         if version == "v2":
             size_map = {
                 "small": "vit_small_patch14_dinov2.lvd142m",
@@ -38,7 +39,6 @@ class DinoEncoder(Encoder):
                 "large": "vit_large_patch14_dinov2.lvd142m"
             }
         elif version == "v3":
-            # Konwencja timm dla DINOv3 (patch size 16 to standard dla v3)
             size_map = {
                 "small": "vit_small_patch16_dinov3.lvd142m",
                 "base": "vit_base_patch16_dinov3.lvd142m",
@@ -53,12 +53,12 @@ class DinoEncoder(Encoder):
 
         print(f"Ładowanie modelu DINO{version} ({model_size}) przez timm: {model_name}...")
         
-        # Pobieramy model bez klasyfikatora (num_classes=0)
+        # Przekazujemy 'input_channels' do parametru 'in_chans' w timm
         self.backbone = timm.create_model(
             model_name, 
             pretrained=True, 
             num_classes=0, 
-            in_chans=in_channels,
+            in_chans=input_channels, 
             dynamic_img_size=True
         )
         
@@ -69,7 +69,6 @@ class DinoEncoder(Encoder):
             for param in self.backbone.parameters():
                 param.requires_grad = False
                 
-        # Warstwa projekcyjna rzutująca wymiary (jeśli target_dim jest wymuszony przez config dekodera)
         self.embed_dim = target_dim if target_dim is not None else self.native_embed_dim
         if target_dim is not None and target_dim != self.native_embed_dim:
             print(f"Dodawanie warstwy projekcyjnej dla DINO: {self.native_embed_dim} -> {self.embed_dim}")
