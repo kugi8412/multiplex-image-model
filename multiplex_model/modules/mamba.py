@@ -9,6 +9,7 @@ try:
 except ImportError:
     Mamba = None
 
+
 @BLOCK_REGISTRY.register("csmamba")
 class CrossScanMambaBlock(Block):
     """4-Way Cross-Scan Mamba Block (Horizontal & Vertical) for perfect 2D spatial awareness."""
@@ -47,41 +48,37 @@ class CrossScanMambaBlock(Block):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, C, H, W = x.shape
         x_norm = self.norm(x)
-        
-        # --- 1. SKANOWANIE POZIOME (Wierszami) ---
-        # Spłaszczanie: [B, C, H, W] -> [B, H*W, C]
+
+        # Flatten: [B, C, H, W] -> [B, H*W, C]
         x_h = x_norm.flatten(2).transpose(1, 2)
         
-        # W przód (Od lewej do prawej)
+        # Forward (from left to right)
         out_h_fwd = self.mamba_h_fwd(x_h)
         
-        # W tył (Od prawej do lewej)
+        # Backward (from right to left)
         out_h_bwd = torch.flip(self.mamba_h_bwd(torch.flip(x_h, dims=[1])), dims=[1])
 
-        # Powrót do siatki 2D
+        # Back to 2D
         out_h_fwd = out_h_fwd.transpose(1, 2).reshape(B, C, H, W)
         out_h_bwd = out_h_bwd.transpose(1, 2).reshape(B, C, H, W)
 
-        # --- 2. SKANOWANIE PIONOWE (Kolumnami) ---
-        # Transpozycja przestrzenna i spłaszczanie: [B, C, H, W] -> [B, C, W, H] -> [B, W*H, C]
+        # [B, C, H, W] -> [B, C, W, H] -> [B, W*H, C]
         x_v = x_norm.transpose(2, 3).flatten(2).transpose(1, 2)
         
-        # W dół (Z góry na dół po kolumnach)
+        # Down (from top to bottom by column)
         out_v_fwd = self.mamba_v_fwd(x_v)
         
-        # W górę (Z dołu do góry po kolumnach)
+        # Bottom (from bottom to up)
         out_v_bwd = torch.flip(self.mamba_v_bwd(torch.flip(x_v, dims=[1])), dims=[1])
 
-        # Powrót do siatki 2D (wymaga ponownej transpozycji osi H i W)
+        # Back to 2D
         out_v_fwd = out_v_fwd.transpose(1, 2).reshape(B, C, W, H).transpose(2, 3)
         out_v_bwd = out_v_bwd.transpose(1, 2).reshape(B, C, W, H).transpose(2, 3)
 
-        # --- 3. FUZJA ---
-        # Sumujemy wiedzę z 4 kierunków
+        # Fusion (SUM)
         out_fuzja = out_h_fwd + out_h_bwd + out_v_fwd + out_v_bwd
-        
-        # Opcjonalnie: warstwa projekcyjna integrująca sumę i Residual Connection
         out = self.proj(out_fuzja)
+
         return x + out
 
 
@@ -123,7 +120,7 @@ class VisionMambaEncoder(Encoder):
                 )
             )
 
-        # Tworzenie bloków Cross-Scan Mamba
+        # Cross-scan MAMBA blocks
         self.blocks = nn.ModuleList()
         for blocks, dim in zip(layers_blocks, embedding_dims):
             self.blocks.append(

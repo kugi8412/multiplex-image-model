@@ -1,0 +1,59 @@
+# ==========================================
+# 1. PARAMETRY MODELU (Architektura)
+# ==========================================
+model_name: "vits16"          # Zgodnie z Tabelą S24 (Small, 12 warstw, 6 głów)
+out_dim: 65536                # Wymiar wyjściowy głowy DINOv2
+drop_path_rate: 0.3           # Zgodnie z Tabelą S24
+
+# ==========================================
+# 2. KONFIGURACJA DANYCH
+# ==========================================
+panel_config_path: "configs/all_panels_config.yaml"
+tokenizer_config_path: "configs/all_markers_tokenizer.yaml"
+num_workers: 8
+
+# ==========================================
+# 3. DINOv2 MULTI-CROP (Augmentacja przestrzenna)
+# ==========================================
+global_crops_number: 2
+global_crops_scale: [0.48, 1.0]
+global_crops_size: [128, 128] # Rozmiar Twoich patchy ImmuVis
+
+local_crops_number: 8
+local_crops_scale: [0.16, 0.48]
+local_crops_size: [64, 64]
+
+# ==========================================
+# 4. OPTYMALIZACJA (Wierna replikacja KRONOS)
+# ==========================================
+device: "cuda"
+epochs: 100                   # Zgodnie z Tabelą S24
+batch_size: 8                 # Fizyczny rozmiar wsadu na Twoim GPU
+gradient_accumulation_steps: 128 # 8 * 128 = 1024 (Oryginalny Effective Batch Size!)
+
+lr: 0.004                     # ORYGINALNY Base LR z publikacji (teraz bezpieczny!)
+final_lr: 1.0e-6              # ORYGINALNY Final LR
+warmup_epochs: 10             # ORYGINALNE Warmup epochs
+
+weight_decay: 0.04            # ORYGINALNE Weight decay (start)
+weight_decay_final: 0.4       # ORYGINALNE Weight decay (end)
+clip_grad: 3.0                # ORYGINALNY Gradient clipping max norm
+
+# ==========================================
+# 5. DINOv2 HIPERPARAMETRY (Destylacja)
+# ==========================================
+warmup_teacher_temp_epochs: 30
+warmup_teacher_temp: 0.04
+teacher_temp: 0.07
+teacher_momentum: 0.992       # Teacher momentum (start)
+
+# ==========================================
+# 6. LOGOWANIE
+# ==========================================
+checkpoints_dir: "checkpoints"
+save_checkpoint_freq: 5
+
+comet_project: "immu-vis"
+comet_workspace: "kugi8412"
+comet_api_key: "V6s4QJ97ca130GE8M4G4MlU5D"
+tags: ["kronos", "dinov2", "original-setup"]

@@ -96,7 +96,9 @@ from .dino import (
 )
 
 # KRONOS architecture
-
+from .kronos import (
+    KronosHybridEncoder
+)
 
 # ResNet architecture
 from .resnet import (
@@ -141,6 +143,8 @@ __all__ = [
     "VisionMambaEncoder",
     # DINO architecture
     "DinoEncoder",
+    # KRONOS architecture
+    "KronosHybridEncoder",
     # ResNet architecture
     "ResNetBasicBlock",
     "ResNetBottleneck",
