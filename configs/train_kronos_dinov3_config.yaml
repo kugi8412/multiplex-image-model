@@ -1,0 +1,74 @@
+# ==========================================
+# KRONOS DINOv3 — CLS + iBOT + KoLeo
+# ==========================================
+# Pure KRONOS ViT backbone (per-channel patch embed + sinusoidal marker IDs).
+# No Hyperkernel. DINOv3-style training with iBOT patch distillation,
+# KoLeo diversity regularizer, SwiGLU FFN, and register tokens.
+#
+# Usage: python train_kronos_dinov2v3.py configs/train_kronos_dinov3_config.yaml
+
+training_mode: "dinov3"
+
+# 1. Model Architecture
+model_name: "vits16"              # vits16 (384d), vitb16 (768d), vitl16 (1024d), vitg14 (1536d)
+out_dim: 65536                    # DINO CLS projection head output dim
+ibot_out_dim: 8192                # iBOT patch projection head output dim
+drop_path_rate: 0.1               # Stochastic depth (student only; teacher = 0)
+patch_size: 16                    # ViT patch size
+num_register_tokens: 4            # DINOv3 register/storage tokens
+ffn_layer: "swiglu"               # SwiGLU FFN (DINOv3 upgrade over standard MLP)
+# init_values: 1.0e-5             # LayerScale (uncomment for deep models)
+
+# 2. Data
+panel_config: "configs/all_panels_config.yaml"
+tokenizer_config: "configs/all_markers_tokenizer.yaml"
+file_extension: "npy"
+num_workers: 8
+
+# 3. DINOv3 Multi-Crop
+global_crops_number: 2
+global_crops_scale: [0.4, 1.0]
+global_crops_size: [128, 128]
+
+local_crops_number: 8
+local_crops_scale: [0.1, 0.4]
+local_crops_size: [64, 64]
+
+# 4. Optimization
+device: "cuda"
+epochs: 200
+batch_size: 4
+gradient_accumulation_steps: 256  # effective batch = 4 * 256 = 1024
+
+lr: 2.0e-4
+final_lr: 1.0e-6
+warmup_epochs: 15
+
+weight_decay: 0.04
+weight_decay_final: 0.4
+clip_grad: 1.0
+
+# 5. DINO Distillation
+warmup_teacher_temp_epochs: 30
+warmup_teacher_temp: 0.04
+teacher_temp: 0.07
+teacher_momentum: 0.996
+
+# 6. iBOT Patch-Level Distillation
+ibot_mask_ratio: 0.3              # fraction of spatial positions to mask
+ibot_loss_weight: 1.0             # iBOT loss weight relative to DINO
+# ibot_warmup_teacher_temp: 0.04  # defaults to warmup_teacher_temp if not set
+# ibot_teacher_temp: 0.07         # defaults to teacher_temp if not set
+
+# 7. KoLeo Diversity Regularizer
+koleo_loss_weight: 0.1            # KoLeo loss weight
+
+# 8. Checkpointing
+from_checkpoint: null
+checkpoints_dir: "checkpoints"
+save_checkpoint_freq: 5
+
+# 9. Logging (set COMET_API_KEY env var)
+tags: ["kronos", "dinov3", "ibot", "koleo", "swiglu", "no-hyperkernel"]
+comet_project: "immu-vis"
+comet_workspace: "kugi8412"
