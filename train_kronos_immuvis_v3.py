@@ -303,7 +303,8 @@ class ImmuvisDINOv3(nn.Module):
 
         # Apply iBOT masking
         if mask is not None:
-            x_enc[mask] = self.mask_token.squeeze(0).squeeze(0).to(x_enc.dtype)
+            mask_value = self.mask_token.squeeze(0).squeeze(0).to(x_enc.dtype)
+            x_enc = torch.where(mask.unsqueeze(-1), mask_value.unsqueeze(0).unsqueeze(0).expand_as(x_enc), x_enc)
 
         # Prepend CLS token
         cls_tokens = self.cls_token.expand(B, -1, -1)
@@ -429,7 +430,8 @@ class KoLeoLoss(nn.Module):
     def forward(self, features: torch.Tensor) -> torch.Tensor:
         features = F.normalize(features, dim=-1, p=2)
         dists = torch.cdist(features, features)
-        dists.fill_diagonal_(float("inf"))
+        diag_mask = torch.eye(dists.shape[0], dtype=torch.bool, device=dists.device)
+        dists = dists.masked_fill(diag_mask, float("inf"))
         min_dists = dists.min(dim=-1).values
         return -torch.log(min_dists + 1e-8).mean()
 

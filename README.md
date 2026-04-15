@@ -163,7 +163,28 @@ Key additions over V2:
 - **Register tokens**: Extra CLS-like tokens that absorb global information
 - **Gram anchoring**: Optional Stage-2 distillation from a frozen Stage-1 teacher
 
-### 4. PixelCNN — Latent Space Density Estimation
+### 4. KRONOS DINOv2/v3 — Pure KRONOS ViT (No Hyperkernel)
+
+Train the KRONOS ViT backbone (per-channel patch embedding + sinusoidal marker IDs) with DINOv2 or DINOv3 objectives, without the Hyperkernel stem. This matches the approach of the original KRONOS and VIRTUES papers:
+
+```bash
+# DINOv2 (CLS-only self-distillation)
+python train_kronos_dinov2v3.py configs/train_kronos_dinov2_config.yaml
+
+# DINOv3 (CLS + iBOT + KoLeo + SwiGLU + register tokens)
+python train_kronos_dinov2v3.py configs/train_kronos_dinov3_config.yaml
+
+# Resume from checkpoint
+python train_kronos_dinov2v3.py configs/train_kronos_dinov3_config.yaml \
+    --from-checkpoint checkpoints/kronos_dinov3-epoch_50.pth
+```
+
+| Config | Mode | Backbone | FFN | Losses |
+|---|---|---|---|---|
+| `train_kronos_dinov2_config.yaml` | DINOv2 | ViT-Base (768d) | MLP | DINO CLS |
+| `train_kronos_dinov3_config.yaml` | DINOv3 | ViT-Base (768d) | SwiGLU | DINO CLS + iBOT + KoLeo |
+
+### 5. PixelCNN — Latent Space Density Estimation
 
 Train a PixelCNN on frozen encoder latent representations for anomaly detection and counterfactual reasoning:
 
@@ -176,6 +197,59 @@ python train_pixelcnn.py configs/train_mambaswin_config.yaml \
 ```
 
 Three distribution heads: `gaussian`, `discretized_logistic_mixture`, `evidential`.
+
+### 6. Embedding Generation
+
+Extract embeddings from any trained model using the universal `generate_embeddings.py` script:
+
+```bash
+python generate_embeddings.py \
+    --model-type <MODEL_TYPE> \
+    --config <CONFIG_YAML> \
+    --checkpoint <CHECKPOINT_PATH> \
+    --input_dir <DIR_WITH_NPY_FILES> [<DIR2> ...] \
+    --output_dir <OUTPUT_DIR> \
+    --batch_size 256
+```
+
+**Supported model types:**
+
+| `--model-type` | Source | Embedding | Notes |
+|---|---|---|---|
+| `immuvis` | `train_masked_model.py` | GAP over latent | Hyperkernel autoencoder encoder |
+| `kronos_dino` | `train_kronos_dino.py` | CLS token | KRONOS ViT + DINO head |
+| `kronos_dinov2v3` | `train_kronos_dinov2v3.py` | CLS token | KRONOS ViT DINOv2/v3 |
+| `kronos_immuvis_v2` | `train_kronos_immuvis_v2.py` | CLS token | Hyperkernel + ViT DINOv2 |
+| `kronos_immuvis_v3` | `train_kronos_immuvis_v3.py` | CLS token | Hyperkernel + DINOv3 blocks |
+| `kronos_pretrained` | HuggingFace Hub | CLS token | Official KRONOS weights |
+| `dino` | `train_masked_model.py` (dino encoder) | GAP over latent | timm DINOv2/v3 backbone |
+
+**Examples:**
+
+```bash
+# ImmuVis autoencoder embeddings
+python generate_embeddings.py --model-type immuvis \
+    --config configs/train_vit_config.yaml \
+    --checkpoint checkpoints/final_model.pth \
+    --input_dir data/test/dataset1/imgs --output_dir embeddings/immuvis/
+
+# KRONOS DINOv2/v3 embeddings
+python generate_embeddings.py --model-type kronos_dinov2v3 \
+    --config configs/train_kronos_dinov2_config.yaml \
+    --checkpoint checkpoints/kronos_dinov2-final.pth \
+    --input_dir data/test/dataset1/imgs --output_dir embeddings/kronos/
+
+# Official KRONOS pretrained (no config needed)
+python generate_embeddings.py --model-type kronos_pretrained \
+    --checkpoint hf_hub:MahmoodLab/kronos \
+    --input_dir data/test/dataset1/imgs --output_dir embeddings/kronos_pretrained/
+```
+
+Input files can be `.npy` or `.npz` containing either:
+- A raw array of shape `(C, H, W)` or `(N, C, H, W)`
+- A dict/npz with keys `patches` (required), `labels`, `channel_ids` (optional)
+
+Output: `emb_<filename>.npy` containing a dict with `embeddings` array `(N, D)` and optional `labels`.
 
 ---
 
@@ -485,7 +559,9 @@ python -m cross_sae.visualize \
 ├── train_kronos_dino.py           # KRONOS DINO V2 self-distillation
 ├── train_kronos_immuvis_v2.py     # ImmunoKronos V2 (DINOv2 baseline)
 ├── train_kronos_immuvis_v3.py     # ImmunoKronos V3 (DINOv3 + iBOT + KoLeo)
+├── train_kronos_dinov2v3.py       # KRONOS ViT DINOv2/v3 (no Hyperkernel)
 ├── train_pixelcnn.py              # PixelCNN on frozen latent space
+├── generate_embeddings.py         # Universal embedding extraction (all model types)
 ├── virtual_staining.py             # Virtual staining evaluation (Pearson)
 ├── receptive_field_saliency.py     # Effective receptive field analysis
 │
@@ -497,6 +573,8 @@ python -m cross_sae.visualize \
 │   ├── train_mambaswin_config.yaml # MambaSwin (rotation-invariant) config
 │   ├── train_dino_finetune*.yaml  # DINOv3 backbone finetuning configs
 │   ├── train_kronos_config.yaml   # KRONOS DINO V2 config
+│   ├── train_kronos_dinov2_config.yaml  # KRONOS ViT DINOv2 config (no Hyperkernel)
+│   ├── train_kronos_dinov3_config.yaml  # KRONOS ViT DINOv3 config (no Hyperkernel)
 │   └── train_immukronos_config.yaml # ImmunoKronos V3 config
 │
 ├── multiplex_model/
