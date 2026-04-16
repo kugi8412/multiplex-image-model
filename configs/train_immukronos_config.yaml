@@ -21,9 +21,9 @@ num_workers: 8
 # ==========================================
 patch_size: 8
 out_dim: 65536
-embed_dim: 384               # ViT-Small dimension
+embed_dim: 768               # ViT-Base dimension
 depth: 12
-num_heads: 6
+num_heads: 12
 drop_path_rate: 0.1
 num_register_tokens: 4        # DINOv3 native register/storage tokens
 ibot_out_dim: 8192            # iBOT patch-level head dimension
@@ -56,7 +56,10 @@ teacher_momentum: 0.996
 # iBOT (patch-level distillation)
 ibot_mask_ratio: 0.3
 ibot_loss_weight: 1.0
-mask_strategy: learnable            # zero | negative | learnable (iBOT mask token type)
+mask_strategy: zero                # zero | negative | learnable (iBOT mask token type)
+output_activation: sigmoid         # sigmoid | hard_sigmoid | sigmoswish
+activation_beta: 1.0               # beta for sigmoswish: f(x) = clamp(x * sigmoid(beta*x), 0, 1)
+uncertainty_method: beta_nll       # evidential (NIG) = standard NLL method
 # ibot_warmup_teacher_temp: 0.04   # defaults to warmup_teacher_temp
 # ibot_teacher_temp: 0.07          # defaults to teacher_temp
 

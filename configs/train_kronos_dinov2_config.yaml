@@ -9,12 +9,15 @@
 training_mode: "dinov2"
 
 # 1. Model Architecture
-model_name: "vits16"              # vits16 (384d), vitb16 (768d), vitl16 (1024d), vitg14 (1536d)
+model_name: "vitb16"              # vits16 (384d), vitb16 (768d), vitl16 (1024d), vitg14 (1536d)
 out_dim: 65536                    # DINO projection head output dim
 drop_path_rate: 0.3               # Stochastic depth (student only; teacher = 0)
-patch_size: 16                    # ViT patch size
+patch_size: 8                     # ViT patch size
 num_register_tokens: 0            # No register tokens in DINOv2
 ffn_layer: "mlp"                  # Standard MLP FFN (DINOv2 default)
+mask_strategy: zero               # zero | negative | learnable
+output_activation: sigmoid        # sigmoid | hard_sigmoid | sigmoswish
+activation_beta: 1.0              # beta for sigmoswish
 # init_values: null               # LayerScale init (null = disabled)
 
 # 2. Data
@@ -34,7 +37,7 @@ local_crops_size: [64, 64]
 
 # 4. Optimization
 device: "cuda"
-epochs: 100
+epochs: 200
 batch_size: 8
 gradient_accumulation_steps: 128  # effective batch = 8 * 128 = 1024
 
@@ -55,7 +58,7 @@ teacher_momentum: 0.992
 # 6. Checkpointing
 from_checkpoint: null
 checkpoints_dir: "checkpoints"
-save_checkpoint_freq: 5
+save_checkpoint_freq: 10
 
 # 7. Logging (set COMET_API_KEY env var)
 tags: ["kronos", "dinov2", "no-hyperkernel"]

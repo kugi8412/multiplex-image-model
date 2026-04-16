@@ -5,10 +5,13 @@
 # Usage: python train_kronos_dino.py configs/train_new_kronos_config.yaml
 
 # 1. Model Architecture
-model_name: "vits16"
+model_name: "vitb16"
 out_dim: 65536
 drop_path_rate: 0.3
-patch_size: 16
+patch_size: 8
+mask_strategy: zero
+output_activation: sigmoswish
+activation_beta: 1.0
 
 # 2. Data
 panel_config: "configs/all_panels_config.yaml"
@@ -27,7 +30,7 @@ local_crops_size: [64, 64]
 
 # 4. Optimization (conservative)
 device: "cuda"
-epochs: 100
+epochs: 200
 batch_size: 4                     # reduced from 8 for OOM safety
 gradient_accumulation_steps: 256  # 4 * 256 = 1024 effective
 

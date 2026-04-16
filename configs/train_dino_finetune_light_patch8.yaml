@@ -61,7 +61,7 @@ beta: 0.5
 # Masking & activation
 mask_strategy: learnable
 output_activation: sigmoswish
-activation_beta: 2.0
+activation_beta: 1.0
 uncertainty_method: evidential
 evidence_reg_coeff: 0.01
 

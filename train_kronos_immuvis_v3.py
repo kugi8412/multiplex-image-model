@@ -438,8 +438,13 @@ class KoLeoLoss(nn.Module):
 
 class GramLoss(nn.Module):
     """Gram anchoring loss (DINOv3) — anchors student patch feature correlations
-    to a frozen Gram teacher to prevent dense feature degradation."""
-    def forward(self, student_patches: torch.Tensor, gram_teacher_patches: torch.Tensor) -> torch.Tensor:
+    to a frozen Gram teacher to prevent dense feature degradation.
+    Only unmasked patches are used to avoid correlating mask-token artifacts."""
+    def forward(self, student_patches: torch.Tensor, gram_teacher_patches: torch.Tensor,
+                unmasked_mask: torch.Tensor = None) -> torch.Tensor:
+        if unmasked_mask is not None:
+            student_patches = student_patches[unmasked_mask].unsqueeze(0) if student_patches.dim() == 2 else torch.stack([sp[um] for sp, um in zip(student_patches, unmasked_mask)])
+            gram_teacher_patches = gram_teacher_patches[unmasked_mask].unsqueeze(0) if gram_teacher_patches.dim() == 2 else torch.stack([tp[um] for tp, um in zip(gram_teacher_patches, unmasked_mask)])
         s = F.normalize(student_patches, dim=-1)
         t = F.normalize(gram_teacher_patches, dim=-1)
         gram_s = torch.bmm(s, s.transpose(1, 2))
@@ -724,7 +729,7 @@ def main():
                 param_group["weight_decay"] = wd_schedule[global_step]
 
             crops = [c.to(device, dtype=torch.float32, non_blocking=True) for c in crops]
-            channel_ids = channel_ids.to(device, non_blocking=True)
+            channel_ids = channel_ids.to(device, dtype=torch.long, non_blocking=True)
 
             # Generate iBOT mask for global crops only
             B = crops[0].shape[0]
@@ -776,9 +781,11 @@ def main():
                         gram_feats = gram_teacher.forward_features(
                             student_global_in, student_cids_global, mask=None
                         )
+                    unmasked = ~ibot_mask
                     loss_gram = gram_loss_fn(
                         student_global_feats["patch_tokens"],
                         gram_feats["patch_tokens"],
+                        unmasked_mask=unmasked,
                     )
                     total_loss = total_loss + gram_weight * loss_gram
 
@@ -821,7 +828,7 @@ def main():
         with torch.no_grad():
             for crops, channel_ids in tqdm(val_dataloader, desc=f"Val Epoch {epoch}"):
                 crops = [c.to(device, dtype=torch.float32, non_blocking=True) for c in crops]
-                channel_ids = channel_ids.to(device, non_blocking=True)
+                channel_ids = channel_ids.to(device, dtype=torch.long, non_blocking=True)
 
                 with torch.amp.autocast('cuda', dtype=autocast_dtype):
                     teacher_global_in = torch.cat(crops[:global_crops_number])

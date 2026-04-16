@@ -10,13 +10,16 @@
 training_mode: "dinov3"
 
 # 1. Model Architecture
-model_name: "vits16"              # vits16 (384d), vitb16 (768d), vitl16 (1024d), vitg14 (1536d)
+model_name: "vitb16"              # vits16 (384d), vitb16 (768d), vitl16 (1024d), vitg14 (1536d)
 out_dim: 65536                    # DINO CLS projection head output dim
 ibot_out_dim: 8192                # iBOT patch projection head output dim
 drop_path_rate: 0.1               # Stochastic depth (student only; teacher = 0)
-patch_size: 16                    # ViT patch size
+patch_size: 8                     # ViT patch size
 num_register_tokens: 4            # DINOv3 register/storage tokens
 ffn_layer: "swiglu"               # SwiGLU FFN (DINOv3 upgrade over standard MLP)
+mask_strategy: zero               # zero | negative | learnable
+output_activation: sigmoswish     # sigmoid | hard_sigmoid | sigmoswish
+activation_beta: 1.0              # beta for sigmoswish
 # init_values: 1.0e-5             # LayerScale (uncomment for deep models)
 
 # 2. Data
@@ -66,7 +69,7 @@ koleo_loss_weight: 0.1            # KoLeo loss weight
 # 8. Checkpointing
 from_checkpoint: null
 checkpoints_dir: "checkpoints"
-save_checkpoint_freq: 5
+save_checkpoint_freq: 10
 
 # 9. Logging (set COMET_API_KEY env var)
 tags: ["kronos", "dinov3", "ibot", "koleo", "swiglu", "no-hyperkernel"]

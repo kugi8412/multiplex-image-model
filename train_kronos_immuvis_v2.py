@@ -309,7 +309,7 @@ def main():
                 param_group["weight_decay"] = wd_schedule[global_step]
 
             crops = [crop.to(device, dtype=torch.float32, non_blocking=True) for crop in crops]
-            channel_ids = channel_ids.to(device, non_blocking=True)
+            channel_ids = channel_ids.to(device, dtype=torch.long, non_blocking=True)
 
             with torch.amp.autocast('cuda', dtype=torch.bfloat16):
                 with torch.no_grad():
@@ -351,7 +351,7 @@ def main():
         with torch.no_grad():
             for crops, channel_ids in tqdm(val_dataloader, desc=f"Val Epoch {epoch}"):
                 crops = [crop.to(device, dtype=torch.float32, non_blocking=True) for crop in crops]
-                channel_ids = channel_ids.to(device, non_blocking=True)
+                channel_ids = channel_ids.to(device, dtype=torch.long, non_blocking=True)
 
                 with torch.amp.autocast('cuda', dtype=torch.bfloat16):
                     teacher_out = teacher(torch.cat(crops[:2]), channel_ids.repeat(2, 1))
