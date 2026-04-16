@@ -1,0 +1,58 @@
+# ==========================================
+# KRONOS DINO — Self-Distillation on ImmuVis
+# ==========================================
+# Usage: python train_kronos_dino.py configs/train_kronos_config.yaml
+
+# 1. Model Architecture
+model_name: "vitb16"              # vits16 (384d), vitb16 (768d), vitl16 (1024d)
+out_dim: 65536                    # DINO projection head output dim
+drop_path_rate: 0.3               # Stochastic depth (student only; teacher = 0)
+patch_size: 8                     # ViT patch size
+mask_strategy: zero               # zero | negative | learnable
+output_activation: sigmoid        # sigmoid | hard_sigmoid | sigmoswish
+activation_beta: 1.0              # beta for sigmoswish
+
+# 2. Data
+panel_config: "configs/all_panels_config.yaml"
+tokenizer_config: "configs/all_markers_tokenizer.yaml"
+file_extension: "npy"
+num_workers: 8
+
+# 3. DINOv2 Multi-Crop
+global_crops_number: 2
+global_crops_scale: [0.48, 1.0]
+global_crops_size: [128, 128]
+
+local_crops_number: 8
+local_crops_scale: [0.16, 0.48]
+local_crops_size: [64, 64]
+
+# 4. Optimization
+device: "cuda"
+epochs: 200
+batch_size: 8
+gradient_accumulation_steps: 128  # effective batch = 8 * 128 = 1024
+
+lr: 0.004                        # base LR (KRONOS paper)
+final_lr: 1.0e-6
+warmup_epochs: 10
+
+weight_decay: 0.04
+weight_decay_final: 0.4
+clip_grad: 3.0
+
+# 5. DINO Distillation
+warmup_teacher_temp_epochs: 30
+warmup_teacher_temp: 0.04
+teacher_temp: 0.07
+teacher_momentum: 0.992
+
+# 6. Checkpointing
+from_checkpoint: null
+checkpoints_dir: "checkpoints"
+save_checkpoint_freq: 5
+
+# 7. Logging (set COMET_API_KEY env var)
+tags: ["kronos", "dinov2", "immuvis"]
+comet_project: "immu-vis"
+comet_workspace: "kugi8412"

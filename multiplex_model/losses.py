@@ -1,217 +1,255 @@
-import torch
-from typing import List, Literal
-from nltk.tree import Tree
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+# losses.py
 
+
+import torch
 import torch.nn as nn
-import torch.nn.functional as F
+
 
 def nll_loss(x, mi, logvar):
-    return torch.mean((x - mi)**2 / (torch.exp(logvar) + 1e-8) + logvar)
-
-class DiceLoss(nn.Module):
-    """
-    Dice Loss for multi-class segmentation tasks.
-    """
-    def __init__(self, smooth=1e-5, weighting: Literal['square', 'linear', 'none'] = 'none'):
-        """
-        Args:
-            smooth (float): Smoothing factor to avoid division by zero.
-            weighting (Literal['square', 'linear', 'none']): Type of weighting to apply to the classes.
-        """
-        super(DiceLoss, self).__init__()
-        self.smooth = smooth
-        self.weighting = weighting
-
-    def forward(self, inputs, targets):
-        """
-        Args:
-            inputs (torch.Tensor): Predicted logits with shape (N, C, H, W).
-            targets (torch.Tensor): One-hot encoded ground truth labels with shape (N, C, H, W).
-        Returns:
-            torch.Tensor: Computed Dice Loss.
-        """
-        inputs = F.softmax(inputs, dim=1)
-
-        inputs_flat = inputs.flatten(start_dim=2).contiguous() # [B, C, H*W]
-        targets_flat = targets.flatten(start_dim=2).contiguous() # [B, C, H*W]
-
-        if self.weighting == 'square':
-            class_weights = 1 / (targets_flat.sum(dim=2).pow(2) + 1e-6)
-        elif self.weighting == 'linear':
-            class_weights = 1 / (targets_flat.sum(dim=2) + 1e-6)
-        else:
-            class_weights = 1.0
-
-        # Compute intersection and union
-        intersection = class_weights * (inputs_flat * targets_flat).sum(dim=2) # [B, C]
-        union = class_weights * (inputs_flat + targets_flat).sum(dim=2) # [B, C]
-
-        # Compute Dice coefficient
-        dice = (2.0 * intersection + self.smooth) / (union + self.smooth)
-
-        # Compute mean Dice loss over all classes and batch
-        loss = 1.0 - dice.mean()
-
-        return loss
-
-class HierarchicalCrossEntropyLoss(torch.nn.Module):
-    """
-    Hierarchical cross entropy loss adapted from:
-    https://github.com/fiveai/making-better-mistakes/blob/master/better_mistakes/model/losses.py 
+    return torch.mean((x - mi) ** 2 / (torch.exp(logvar) + 1e-8) + logvar)
 
 
-    The weights must be implemented as a nltk.tree object and each node must
-    be a float which corresponds to the weight associated with the edge going
-    from that node to its parent. The value at the origin is not used and the
-    shapre of the weight tree must be the same as the associated hierarchy.
+def beta_nll_loss(x, mi, logvar, beta=1.0):
+    sg_var_beta = logvar.detach().exp().pow(beta)
+    nll = (x - mi) ** 2 / (torch.exp(logvar) + 1e-8) + logvar
+    beta_nll = sg_var_beta * nll
+    return torch.mean(beta_nll)
 
-    The input is a flat probability vector in which each entry corresponds to
-    a leaf node of the tree. 
+
+# -------------------------------------------------------------------
+# Evidential Deep Regression (Normal-Inverse-Gamma)
+# The model predicts 4 parameters per pixel:
+#   (gamma)  — predicted mean
+#   (nu)     — evidence (virtual observation count, > 0)
+#   (alpha)  — Inverse-Gamma shape (> 1 for finite variance)
+#   (beta)   — Inverse-Gamma rate (> 0)
+#
+# These parameterize a Normal-Inverse-Gamma prior:
+#   sigma^2 ~ Inv-Gamma(alpha, beta)           — aleatoric uncertainty
+#   mu | sigma^2 ~ Normal(gamma, sigma^2/nu)       — epistemic uncertainty
+#
+# Posterior predictive is Student-t(2alpha) with:
+#   mean = gamma
+#   var  = beta(1 + nu) / (nu*alpha)
+#
+# Uncertainty decomposition:
+#   Aleatoric  = beta / (alpha - 1)          — irreducible data noise
+#   Epistemic  = beta / (nu(alpha - 1))       — model uncertainty (shrinks with evidence)
+#   Total      = Aleatoric + Epistemic = beta(1 + nu) / (nu(alpha - 1))
+#
+# -------------------------------------------------------------------
+
+
+def evidential_loss(x, gamma, nu, alpha, beta, reg_coeff=0.01):
+    """Normal-Inverse-Gamma evidential regression loss.
+
+    Combines the negative log-marginal-likelihood of the Student-t predictive
+    distribution with an evidence regularizer that penalizes high evidence
+    (confidence) on incorrect predictions.
 
     Args:
-        hierarchy: The hierarchy used to define the loss.
-        classes: A list of classes defining the order of the leaf nodes.
-        weights: The weights as a tree of similar shape as hierarchy.
+        x: Ground truth values. Shape: (B, C, H, W)
+        gamma: Predicted mean. Shape: (B, C, H, W)
+        nu: Evidence (virtual observation count, > 0). Shape: (B, C, H, W)
+        alpha: Inverse-Gamma shape (> 1). Shape: (B, C, H, W)
+        beta: Inverse-Gamma rate (> 0). Shape: (B, C, H, W)
+        reg_coeff: Weight for the evidence regularizer. Controls how strongly
+            the model is penalized for being confident and wrong. Default: 0.01
+
+    Returns:
+        Scalar loss value.
+
+    Notes:
+        The NLL term is the negative log-marginal of a Student-t(2*alpha) distribution
+        with location gamma and scale β(1+nu)/(nu*alpha). The regularizer is
+        |x - gamma| * (2*nu + alpha), which penalizes high evidence on residuals.
+    """
+    # Residual
+    error = x - gamma
+
+    # Negative log-marginal-likelihood of Student-t predictive
+    # p(x | γ, ν, α, β) = St(x; γ, β(1+ν)/(να), 2α)
+    omega = 2.0 * beta * (1.0 + nu)
+    nll = (
+        0.5 * torch.log(torch.pi / (nu + 1e-8))
+        - alpha * torch.log(omega + 1e-8)
+        + (alpha + 0.5) * torch.log(error.pow(2) * nu + omega + 1e-8)
+        + torch.lgamma(alpha)
+        - torch.lgamma(alpha + 0.5)
+    )
+
+    # Evidence regularizer: penalize confidence on wrong predictions
+    # When error is large, this pushes nu and alpha down (less evidence).
+    # When error is small, this term vanishes — the model can be confident.
+    reg = error.abs() * (2.0 * nu + alpha)
+
+    return torch.mean(nll + reg_coeff * reg)
+
+
+def evidential_uncertainty(nu, alpha, beta):
+    """Decompose uncertainty from NIG parameters.
+
+    Args:
+        nu: Evidence (> 0)
+        alpha: Shape (> 1)
+        beta: Rate (> 0)
+
+    Returns:
+        aleatoric: Irreducible data noise — β / (α - 1)
+        epistemic: Model uncertainty — β / (ν(α - 1))
+        total: Full predictive variance — β(1 + ν) / (ν(α - 1))
+    """
+    alpha_m1 = alpha - 1.0 + 1e-8  # numerical safety
+    aleatoric = beta / alpha_m1
+    epistemic = beta / (nu * alpha_m1)
+    total = aleatoric + epistemic
+    return aleatoric, epistemic, total
+
+
+def RankMe(features):
+    U, S, V = torch.linalg.svd(features)
+    p = S / (S.sum() + 1e-7)
+    entropy = -torch.sum(p * torch.log(p + 1e-7))
+    rank_me = torch.exp(entropy)
+    return rank_me
+
+
+def get_output_activation(name: str, beta: float = 1.0, window: float = 0.5):
+    """Factory for output activation functions.
+
+    All activations map to approximately [0, 1] to match normalized
+    pixel values.
+
+    Args:
+        name: Activation name. One of:
+            ``'sigmoid'``
+                Standard sigmoid sigma(x). Output strictly in (0, 1).
+                Problem: never reaches 0, vanishing gradients for large |x|.
+            ``'hard_sigmoid'``
+                Piecewise-linear approximation: clamp(0.2x + 0.5, 0, 1).
+                Reaches 0 and 1 exactly. No vanishing gradient in the
+                linear region, but non-smooth at the kink points.
+            ``'sigmoswish'``
+                x * sigmoid(βx) clamped to [0, 1]. f(0) = 0 with non-zero
+                gradient. β controls ramp sharpness. Has gradient
+                discontinuity at clamp boundaries.
+            ``'swishoid'``
+                (x+w)·sigmoid(β(x+w)) gated by sigmoid(β(x-w)/(2w)). No clamp.
+                Smooth everywhere with non-zero gradient. **Recommended.**
+        beta: Temperature/sharpness parameter. Higher β =
+            faster saturation. Default 1.0; recommended 4.0 for swishoid,
+            2.0 for sigmoswish.
+        window: Half-width for swishoid zero-crossing control.
+            Default 0.5 (matches [0, 1] data range). Ignored by other
+            activations.
+
+    Returns:
+        Callable that maps raw predictions to ≈[0, 1].
+    """
+    if name == "sigmoid":
+        return torch.sigmoid
+
+    if name == "hard_sigmoid":
+        def _hard_sigmoid(x: torch.Tensor) -> torch.Tensor:
+            return torch.clamp(0.2 * x + 0.5, 0.0, 1.0)
+        return _hard_sigmoid
+
+    if name == "sigmoswish":
+        def _sigmoswish(x: torch.Tensor) -> torch.Tensor:
+            return torch.clamp(x * torch.sigmoid(beta * x), 0.0, 1.0)
+        return _sigmoswish
+
+    if name == "swishoid":
+        def _swishoid(x: torch.Tensor) -> torch.Tensor:
+            upper = (x + window) * torch.sigmoid(beta * (x + window))
+            lower = (x - window) / (2.0 * window)
+            return torch.sigmoid(beta * lower) * upper
+        return _swishoid
+
+    raise ValueError(
+        f"Unknown output activation '{name}'. "
+        "Choose from: sigmoid, hard_sigmoid, sigmoswish, swishoid"
+    )
+
+
+# --------------------------------------------------------------------
+# Learnable Output Activation (nn.Module)
+# --------------------------------------------------------------------
+
+class LearnableOutputActivation(nn.Module):
+    """Output activation with optionally learnable parameters.
+
+    When 'learnable=True', 'beta' and 'window' become
+    ``nn.Parameter`` tensors that the optimiser will update alongside
+    the rest of the model.  This lets the network itself discover the
+    optimal activation shape — analogous to how learnable mask tokens
+    replaced fixed mask values.
+
+    The module's parameters are included in 'model.parameters()'
+    automatically, so no special optimiser handling is needed.
+
+    Args:
+        name: Activation type (same options as 'get_output_activation').
+        beta: Initial beta value.
+        window: Initial window value (used by swishoid only).
+        learnable: If 'True', beta (and window for swishoid) become
+            trainable 'nn.Parameter' tensors.
     """
 
-    def __init__(self, hierarchy: Tree, classes: List[str], weights: Tree):
-        super().__init__()
-
-        assert hierarchy.treepositions() == weights.treepositions()
-
-        # the tree positions of all the leaves
-        positions_leaves = {self.get_label(hierarchy[p]): p for p in hierarchy.treepositions("leaves")}
-        num_classes = len(positions_leaves)
-
-        # we use classes in the given order
-        positions_leaves = [positions_leaves[c] for c in classes]
-
-        # the tree positions of all the edges (we use the bottom node position)
-        positions_edges = hierarchy.treepositions()[1:]  # the first one is the origin
-
-        # map from position tuples to leaf/edge indices
-        index_map_leaves = {positions_leaves[i]: i for i in range(len(positions_leaves))}
-        index_map_edges = {positions_edges[i]: i for i in range(len(positions_edges))}
-
-        # edge indices corresponding to the path from each index to the root
-        edges_from_leaf = [[index_map_edges[position[:i]] for i in range(len(position), 0, -1)] for position in positions_leaves]
-
-        # get max size for the number of edges to the root
-        num_edges = max([len(p) for p in edges_from_leaf])
-
-        leaves_depths = [ num_edges - len(position) for position in positions_leaves]
-
-        # helper that returns all leaf positions from another position wrt to the original position
-        def get_leaf_positions(position):
-            node = hierarchy[position]
-            if isinstance(node, Tree):
-                return node.treepositions("leaves")
-            else:
-                return [()]
-
-        # indices of all leaf nodes for each edge index
-        leaf_indices = [[index_map_leaves[position + leaf] for leaf in get_leaf_positions(position)] for position in positions_edges]
-
-        # save all relevant information as pytorch tensors for computing the loss on the gpu
-        self.onehot_den = torch.nn.Parameter(torch.zeros([num_classes, num_classes, num_edges]), requires_grad=False)
-        self.onehot_num = torch.nn.Parameter(torch.zeros([num_classes, num_classes, num_edges]), requires_grad=False)
-        self.weights = torch.nn.Parameter(torch.zeros([num_classes, num_edges]), requires_grad=False)
-
-        # one hot encoding of the numerators and denominators and store weights
-        for i in range(num_classes):
-
-            for j, k in enumerate(edges_from_leaf[i]):
-                self.onehot_num[i, leaf_indices[k], leaves_depths[i] + j] = 1.0
-                self.weights[i, leaves_depths[i] + j] = float(self.get_label(weights[positions_edges[k]]))
-                
-        self.onehot_den[:, :, :-1] = self.onehot_num[:, :, 1:] 
-        self.onehot_den[:, :, -1] = 1.0 
-
-
-    def get_label(self, node):
-        if isinstance(node, Tree):
-            return node.label()
-        else:
-            return node
-
-    def forward(self, inputs, target):
-        """
-        Foward pass, computing the loss.
-
-        Args:
-            inputs: Class indices ordered as the input hierarchy.
-            target: The index of the ground truth class.
-        """
-        inputs = torch.softmax(inputs, dim=-1)
-
-        # indices for numerators
-        num = torch.einsum('bhwc, bhwce -> bhwe', inputs, self.onehot_num[target])
-
-        # indices for denominators
-        den = torch.einsum('bhwc, bhwce -> bhwe', inputs, self.onehot_den[target]) 
-
-
-        # compute the loss as the negative log of the sum of exponentials 
-        loss = torch.zeros_like(num)
-        idx = num != 0
-        loss[idx] = (-torch.log(num[idx]) + torch.log(den[idx])).to(loss.dtype)
-
-        # weighted sum of all logs for each path 
-        # loss *= self.weights[target]
-        loss = torch.einsum('bhwe, bhwe -> bhw', loss, self.weights[target])
-
-        # return sum of losses / batch size
-        return loss.mean()
-
-
-class CombinedLoss(nn.Module):
-    """Combined loss function of Dice and Cross Entropy losses."""
-    
     def __init__(
-            self, 
-            hierarchy: Tree,
-            classes: List[str],
-            weights_tree: Tree,
-            smooth: float = 1e-5, 
-            weighting: Literal['square', 'linear', 'none'] = 'linear',
-        ):
-        """Initialize the Combined Loss.
+        self,
+        name: str = "swishoid",
+        beta: float = 4.0,
+        window: float = 0.5,
+        learnable: bool = False,
+    ):
+        super().__init__()
+        self.name = name
+        self.learnable = learnable
 
-        Args:
-            smooth (float): Smoothing factor for the Dice loss.
-            weighting (Literal['square', 'linear', 'none']): Type of weighting to apply to the classes in Dice loss.
-        """
-        super(CombinedLoss, self).__init__()
+        if learnable:
+            # Store in log-space so the raw parameter is unconstrained
+            self._log_beta = nn.Parameter(torch.tensor(float(beta)).log())
+            if name == "swishoid":
+                self._log_window = nn.Parameter(torch.tensor(float(window)).log())
+            else:
+                self.register_buffer("_log_window", torch.tensor(float(window)).log())
+        else:
+            self.register_buffer("_log_beta", torch.tensor(float(beta)).log())
+            self.register_buffer("_log_window", torch.tensor(float(window)).log())
 
-        self.dice_loss = DiceLoss(smooth=smooth, weighting=weighting)
-        # self.ce_loss = nn.CrossEntropyLoss(reduction='mean')
-        # self.focal_loss = partial(
-        #     sigmoid_focal_loss, 
-        #     alpha=0.25, 
-        #     gamma=2.0, 
-        #     reduction='mean'
-        # )
-        self.hierarchical_ce_loss = HierarchicalCrossEntropyLoss(
-            hierarchy=hierarchy,
-            classes=classes,
-            weights=weights_tree
+    @property
+    def beta(self) -> torch.Tensor:
+        return torch.nn.functional.softplus(self._log_beta) + 0.01
+
+    @property
+    def window(self) -> torch.Tensor:
+        return torch.nn.functional.softplus(self._log_window) + 0.01
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        beta = self.beta
+        window = self.window
+
+        if self.name == "sigmoid":
+            return torch.sigmoid(x)
+
+        if self.name == "hard_sigmoid":
+            return torch.clamp(0.2 * x + 0.5, 0.0, 1.0)
+
+        if self.name == "sigmoswish":
+            return torch.clamp(x * torch.sigmoid(beta * x), 0.0, 1.0)
+
+        if self.name == "swishoid":
+            upper = (x + window) * torch.sigmoid(beta * (x + window))
+            lower = (x - window) / (2.0 * window)
+            return torch.sigmoid(beta * lower) * upper
+
+        raise ValueError(f"Unknown activation '{self.name}'")
+
+    def extra_repr(self) -> str:
+        return (
+            f"name={self.name}, beta={self.beta.item():.3f}, "
+            f"window={self.window.item():.3f}, learnable={self.learnable}"
         )
-
-    def forward(self, inputs: torch.Tensor, targets: torch.Tensor, targets_one_hot: torch.Tensor) -> torch.Tensor:
-        """Forward pass of the Combined Loss.
-
-        Args:
-            inputs (torch.Tensor): Predicted logits with shape (B, C, H, W).
-            targets (torch.Tensor): Ground truth labels with shape (B, H, W).
-            targets_one_hot (torch.Tensor): One-hot encoded ground truth labels with shape (B, C, H, W).
-
-        Returns:
-            torch.Tensor: Computed Combined Loss.
-        """
-        dice_loss = self.dice_loss(inputs, targets_one_hot)
-
-        # ce_loss = self.ce_loss(inputs.permute(0, 3, 1, 2).contiguous(), targets)
-        ce_loss = self.hierarchical_ce_loss(inputs, targets)
-        # focal_loss = self.focal_loss(inputs, targets_one_hot)
-
-        return dice_loss, ce_loss

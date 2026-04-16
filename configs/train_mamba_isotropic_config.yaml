@@ -1,0 +1,72 @@
+encoder:
+    ma_layers_blocks: []
+    ma_embedding_dims: []
+
+    pm_layers_blocks: [16]
+    pm_embedding_dims: [768]
+
+    encoder_type:
+      type: vim
+      module_parameters:
+         block_parameters:
+          d_state: 16
+          d_conv: 4
+          expand: 1
+
+    hyperkernel_config:
+      kernel_size: 8
+      padding: 0
+      stride: 8
+      use_bias: true
+
+decoder:
+  decoded_embed_dim: 768
+  num_blocks: 1
+  
+  block_type:
+    type: vit
+    module_parameters:
+       num_heads: 12
+
+  hyperkernel_config:
+      kernel_size: 1
+      padding: 0
+      stride: 1
+      use_bias: true
+
+# Data configuration
+panel_config: configs/all_panels_config.yaml
+tokenizer_config: configs/all_markers_tokenizer.yaml
+input_image_size: [128, 128]
+num_workers: 8
+batch_size: 8
+
+# Training configuration
+device: cuda
+lr: 3e-4
+final_lr: 8e-6
+weight_decay: 0.05
+gradient_accumulation_steps: 1
+epochs: 10
+frac_warmup_steps: 0.3
+min_channels_frac: 0.75
+spatial_masking_ratio: 0.6
+fully_masked_channels_max_frac: 0.5
+mask_patch_size: 8
+from_checkpoint: null
+checkpoints_dir: checkpoints
+save_checkpoint_freq: 5
+beta: 0.5
+
+# Masking & activation
+mask_strategy: learnable            # zero | negative | learnable
+output_activation: sigmoswish       # sigmoid | hard_sigmoid | sigmoswish
+activation_beta: 2.0                # temperature for sigmoswish
+uncertainty_method: evidential
+evidence_reg_coeff: 0.01
+
+# Comet.ml logging
+tags: ["mamba", "isotropic", "10epochs"]
+comet_project: ...
+comet_workspace: ...
+comet_api_key: ...

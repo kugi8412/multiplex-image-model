@@ -1,0 +1,27 @@
+# ==========================================
+# Example VirTues datasets configuration
+# ==========================================
+# Each dataset entry must have the following paths:
+#   crop_dir:       directory with pre-cropped .npy files ({tissue_id}_{crop_id}.npy)
+#   tissue_index:   CSV with columns: tissue_id, split
+#   crop_index:     CSV with columns: tissue_id, crop_id
+#   channels_file:  CSV with columns: marker_name (or protein_id)
+#   quantiles_file: CSV indexed by tissue_id with per-channel 99th percentile values
+#   means_file:     CSV indexed by tissue_id with per-channel means (in log-space)
+#   stds_file:      CSV indexed by tissue_id with per-channel stds (in log-space)
+
+datasets:
+  example_dataset:
+    crop_dir: "/path/to/example_dataset/crops"
+    tissue_index: "/path/to/example_dataset/tissue_index.csv"
+    crop_index: "/path/to/example_dataset/crop_index.csv"
+    channels_file: "/path/to/example_dataset/channels.csv"
+    quantiles_file: "/path/to/example_dataset/quantiles.csv"
+    means_file: "/path/to/example_dataset/means.csv"
+    stds_file: "/path/to/example_dataset/stds.csv"
+
+  # Add more datasets below; they will be concatenated during training.
+  # another_dataset:
+  #   crop_dir: "/path/to/another/crops"
+  #   tissue_index: "/path/to/another/tissue_index.csv"
+  #   ...

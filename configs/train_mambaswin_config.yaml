@@ -1,0 +1,82 @@
+encoder:
+    # marker-agnostic part
+    ma_layers_blocks: [4,]
+    ma_embedding_dims: [16,]
+    
+    # pan-marker part — Hierarchical 4-Way Mamba x Swin Transformer
+    pm_layers_blocks: [2, 4, 4, 2]
+    pm_embedding_dims: [96, 192, 384, 768]
+    
+    # Architecture type with MambaSwin parameters
+    encoder_type:
+      type: mambaswin
+      module_parameters:
+         block_parameters:
+          window_size: 7
+          d_state: 16
+          d_conv: 4
+          ssm_expand: 2
+          ffn_expand: 4
+          drop_path: 0.2
+          rotation_invariant: true
+
+    hyperkernel:
+      kernel_size: 1
+      padding: 0
+      stride: 1
+      use_bias: true
+
+decoder:
+  decoded_embed_dim: 384
+  num_blocks: 1
+  num_outputs: 4  # evidential: γ, ν, α, β
+  
+  block_type:
+    type: vit
+    module_parameters:
+       num_heads: 8
+
+  hyperkernel:
+      kernel_size: 1
+      padding: 0
+      stride: 1
+      use_bias: true
+
+# Data configuration
+panel_config: configs/all_panels_config.yaml
+tokenizer_config: configs/all_markers_tokenizer.yaml
+input_image_size: [128, 128]
+num_workers: 8
+batch_size: 4
+
+# Training configuration
+device: cuda
+lr: 5e-4
+final_lr: 1e-5
+weight_decay: 0.01
+gradient_accumulation_steps: 2
+epochs: 200
+frac_warmup_steps: 0.05
+min_channels_frac: 0.75
+spatial_masking_ratio: 0.6
+fully_masked_channels_max_frac: 0.5
+mask_patch_size: 8
+from_checkpoint: null
+checkpoints_dir: checkpoints
+save_checkpoint_freq: 10
+
+# Uncertainty
+uncertainty_method: evidential
+evidence_reg_coeff: 0.01
+beta: 1.0
+
+# Masking & activation
+mask_strategy: learnable            # zero | negative | learnable
+output_activation: sigmoswish       # sigmoid | hard_sigmoid | sigmoswish
+activation_beta: 2.0                # temperature for sigmoswish
+
+# Comet.ml logging configuration
+tags: [mambaswin, rotinv, evidential]
+comet_project: ...
+comet_workspace: ...
+comet_api_key: ...

@@ -1,0 +1,68 @@
+# Exp 5b: Finetune HuggingFace DINOv3 backbone (unfrozen, MSE)
+encoder:
+    ma_layers_blocks: []
+    ma_embedding_dims: []
+    pm_layers_blocks: [1]
+    pm_embedding_dims: [768]
+
+    encoder_type:
+      type: dino
+      module_parameters:
+        version: "v3"
+        model_size: "base"
+        freeze_backbone: false
+        target_dim: 768
+
+    hyperkernel:
+      kernel_size: 1
+      padding: 0
+      stride: 1
+      use_bias: true
+
+decoder:
+  decoded_embed_dim: 768
+  num_blocks: 4
+  scaling_factor: 16
+
+  block_type:
+    type: vit
+    module_parameters:
+       num_heads: 12
+
+  hyperkernel:
+      kernel_size: 1
+      padding: 0
+      stride: 1
+      use_bias: true
+
+panel_config: configs/all_panels_config.yaml
+tokenizer_config: configs/all_markers_tokenizer.yaml
+input_image_size: [128, 128]
+num_workers: 8
+batch_size: 8
+device: cuda
+
+lr: 1.5e-4
+final_lr: 8e-6
+weight_decay: 0.05
+gradient_accumulation_steps: 1
+epochs: 200
+frac_warmup_steps: 0.2
+min_channels_frac: 0.75
+spatial_masking_ratio: 0.6
+fully_masked_channels_max_frac: 0.5
+mask_patch_size: 16
+
+from_checkpoint: null
+checkpoints_dir: checkpoints/exp5b_finetune_dinov3
+save_checkpoint_freq: 10
+beta: 1.0
+
+mask_strategy: learnable
+output_activation: sigmoswish
+activation_beta: 1.0
+uncertainty_method: beta_nll
+
+tags: ["exp5b", "dinov3", "finetune", "unfrozen", "200epochs"]
+comet_project: "immu-vis"
+comet_workspace: "kugi8412"

@@ -1,0 +1,73 @@
+encoder:
+    # Empty Marker Agnostic for raw images
+    ma_layers_blocks: []
+    ma_embedding_dims: []
+
+    pm_layers_blocks: [1, 1, 1, 1, 1] # Scaling factor x16
+    pm_embedding_dims: [3, 768, 768, 768, 768] 
+
+    encoder_type:
+      type: dino
+      module_parameters:
+        version: "v3"
+        model_size: "base"
+        freeze_backbone: false
+        target_dim: 768
+
+    hyperkernel:
+      kernel_size: 1
+      padding: 0
+      stride: 1
+      use_bias: true
+
+decoder:
+  decoded_embed_dim: 768
+  num_blocks: 1
+  
+  block_type:
+    type: vit
+    module_parameters:
+       num_heads: 12
+
+  hyperkernel:
+      kernel_size: 1
+      padding: 0
+      stride: 1
+      use_bias: true
+
+# Data configuration
+panel_config: configs/all_panels_config.yaml
+tokenizer_config: configs/all_markers_tokenizer.yaml
+input_image_size: [128, 128]
+num_workers: 8
+batch_size: 8
+
+# Training configuration
+device: cuda
+lr: 3e-4
+final_lr: 8e-6
+weight_decay: 0.0001
+gradient_accumulation_steps: 1
+epochs: 200
+frac_warmup_steps: 0.2
+min_channels_frac: 0.75
+spatial_masking_ratio: 0.6
+fully_masked_channels_max_frac: 0.5
+mask_patch_size: 16
+from_checkpoint: null
+checkpoints_dir: checkpoints
+save_checkpoint_freq: 10
+beta: 0.5
+
+# Masking & activation
+mask_strategy: learnable            # zero | negative | learnable
+output_activation: sigmoswish       # sigmoid | hard_sigmoid | sigmoswish
+activation_beta: 2.0                # temperature for sigmoswish
+uncertainty_method: evidential
+evidence_reg_coeff: 0.01
+
+# Comet.ml logging
+tags: ["dinov3", "transfer-learning", "200epochs"]
+comet_project: "immu-vis"
+comet_workspace: "kugi8412"
+comet_api_key: "V6s4QJ97ca130GE8M4G4MlU5D"
