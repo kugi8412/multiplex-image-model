@@ -13,6 +13,9 @@ Supported model types (--model-type):
   kronos_immuvis_v3  ImmunoKronos V3 (train_kronos_immuvis_v3.py checkpoint)
   kronos_pretrained  Official KRONOS HuggingFace weights
   dino             DINOv2/v3 backbone via timm (from train_masked_model.py with dino encoder)
+  mamba            Mamba/MambaSwin encoder (from train_masked_model.py with vim encoder)
+  dino_finetune    Finetuned DINO encoder (from train_masked_model.py with dino encoder)
+  virtual_staining Virtual staining model (MultiplexAutoencoder, encoder embeddings)
 
 Usage examples:
   python generate_embeddings.py --model-type immuvis \\
@@ -324,6 +327,49 @@ def load_dino_encoder(config, checkpoint_path, device):
     return extract_fn, input_size
 
 
+def load_masked_model(config, checkpoint_path, device):
+    """Load a MultiplexAutoencoder trained via train_masked_model.py.
+
+    Works for any encoder type (vim/Mamba, dino, vit) and both uncertainty
+    methods (evidential num_outputs=4, beta_nll num_outputs=2).
+    """
+    from multiplex_model.modules.immuvis import MultiplexAutoencoder
+
+    tokenizer = _load_tokenizer(config)
+    num_channels = len(tokenizer)
+    input_size = tuple(config.get("input_image_size", [128, 128]))
+
+    decoder_cfg = dict(config["decoder"])
+    uncertainty_method = config.get("uncertainty_method", "beta_nll")
+    if "num_outputs" not in decoder_cfg:
+        decoder_cfg["num_outputs"] = 4 if uncertainty_method == "evidential" else 2
+
+    model = MultiplexAutoencoder(
+        num_channels=num_channels,
+        encoder_config=config["encoder"],
+        decoder_config=decoder_cfg,
+    ).to(device)
+
+    ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    if isinstance(ckpt, dict):
+        state_dict = ckpt.get("model_state_dict", ckpt.get("model", ckpt))
+    else:
+        state_dict = ckpt
+    model.load_state_dict(state_dict, strict=False)
+    model.eval()
+
+    def extract_fn(x, channel_ids):
+        enc_out = model.encode(x, channel_ids)
+        latent = enc_out["output"]
+        if latent.ndim == 4:
+            return latent.mean(dim=(2, 3))
+        elif latent.ndim == 3:
+            return latent.mean(dim=1)
+        return latent
+
+    return extract_fn, input_size
+
+
 MODEL_LOADERS = {
     "immuvis": load_immuvis,
     "kronos_dino": load_kronos_dino,
@@ -332,6 +378,9 @@ MODEL_LOADERS = {
     "kronos_immuvis_v3": load_kronos_immuvis_v3,
     "kronos_pretrained": load_kronos_pretrained,
     "dino": load_dino_encoder,
+    "mamba": load_masked_model,
+    "dino_finetune": load_masked_model,
+    "virtual_staining": load_masked_model,
 }
 
 
