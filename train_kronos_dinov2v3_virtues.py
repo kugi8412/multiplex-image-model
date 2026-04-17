@@ -33,6 +33,7 @@ import functools
 import math
 import os
 import random
+from glob import glob
 
 import comet_ml  # noqa: F401
 import numpy as np
@@ -353,15 +354,123 @@ def build_immuvis_dataloader(config, PANEL_CONFIG, TOKENIZER, train_transform):
 # 4b. VIRTUES-LITE ON ARCSINH DATA
 # -------------------------------------------
 
+def _check_virtues_precomputed(panel_config: dict, suffix: str = "_virtues") -> str | None:
+    """Check if VirTues-preprocessed data already exists.
+
+    Looks for a directory at {original_train_path}{suffix}/ with the same
+    dataset subdirectories containing .npy files.
+
+    Returns:
+        The path to precomputed data root if found, otherwise None.
+    """
+    train_path = panel_config["paths"].get("train", "")
+    virtues_path = train_path.rstrip("/") + suffix
+    if not os.path.isdir(virtues_path):
+        return None
+    # Check that at least one dataset has files
+    for dataset in panel_config.get("datasets", []):
+        imgs_dir = os.path.join(virtues_path, dataset, "imgs")
+        if os.path.isdir(imgs_dir) and len(glob(os.path.join(imgs_dir, "*.npy"))) > 0:
+            return virtues_path
+    return None
+
+
 def build_arcsinh_virtues_dataloader(config, PANEL_CONFIG, TOKENIZER,
                                      marker_id_map, train_transform):
     """Load arcsinh data via DatasetFromTIFF, apply VirTues-style augmentations.
 
-    Pipeline: load arcsinh .npy → Gaussian blur → z-standardize (using
+    If pre-computed VirTues data exists (created by prepare_virtues_data.py),
+    loads it directly with no additional preprocessing.
+    Otherwise falls back to runtime preprocessing:
+    load arcsinh .npy → Gaussian blur → z-standardize (using
     marker_metadata.csv stats) → channel dropout → multi-crop.
-    No butterworth filter, no clip normalization.
     """
     from multiplex_model.data import DatasetFromTIFF, PanelBatchSampler
+
+    virtues_suffix = config.get("virtues_data_suffix", "_virtues")
+    precomputed_path = _check_virtues_precomputed(PANEL_CONFIG, suffix=virtues_suffix)
+
+    if precomputed_path is not None:
+        print(f"[VirTues] Found pre-computed data at: {precomputed_path}")
+        print("[VirTues] Loading directly — no runtime preprocessing needed.")
+
+        # Build a modified panel config pointing to the precomputed path
+        virtues_panel_config = dict(PANEL_CONFIG)
+        virtues_panel_config["paths"] = {}
+        for split, original_path in PANEL_CONFIG["paths"].items():
+            virtues_panel_config["paths"][split] = original_path.rstrip("/") + virtues_suffix
+
+        channel_fraction = tuple(config.get("channel_fraction", [0.75, 1.0]))
+
+        class PrecomputedVirtuesDINOWrapper(Dataset):
+            """Load pre-computed VirTues data — no additional preprocessing."""
+
+            def __init__(self, base_dataset, transform):
+                self.base_dataset = base_dataset
+                self.transform = transform
+
+            def __len__(self):
+                return len(self.base_dataset)
+
+            def __getitem__(self, idx):
+                img, channel_ids, dataset_name, img_path = self.base_dataset[idx]
+                if isinstance(img, np.ndarray):
+                    img = torch.from_numpy(img).float()
+                elif img.dtype != torch.float32:
+                    img = img.float()
+                crops = self.transform(img)
+                return crops, channel_ids, dataset_name, img_path
+
+        def dino_collate_fn(batch):
+            num_crops = len(batch[0][0])
+            C = batch[0][1].shape[0]
+            frac = random.uniform(*channel_fraction)
+            n_keep = max(1, int(C * frac))
+            perm = torch.randperm(C)[:n_keep].sort().values if n_keep < C else None
+
+            collated_crops = []
+            for i in range(num_crops):
+                crops = torch.stack([item[0][i] for item in batch])
+                if perm is not None:
+                    crops = crops[:, perm]
+                collated_crops.append(crops)
+
+            channel_ids = torch.stack([item[1] for item in batch])
+            if perm is not None:
+                channel_ids = channel_ids[:, perm]
+
+            dataset_names = [item[2] for item in batch]
+            img_paths = [item[3] for item in batch]
+            return collated_crops, channel_ids, dataset_names, img_paths
+
+        train_dataset_base = DatasetFromTIFF(
+            panels_config=virtues_panel_config,
+            split="train",
+            marker_tokenizer=TOKENIZER,
+            transform=None,
+            use_preprocessing=False,       # already preprocessed
+            use_butterworth_filter=False,   # already done
+            use_clip_normalization=False,   # already done
+            file_extension=config.get("file_extension", "npy"),
+        )
+
+        train_dataset = PrecomputedVirtuesDINOWrapper(train_dataset_base, train_transform)
+        train_batch_sampler = PanelBatchSampler(train_dataset_base, config["batch_size"])
+
+        return DataLoader(
+            train_dataset,
+            batch_sampler=train_batch_sampler,
+            num_workers=config.get("num_workers", 4),
+            collate_fn=dino_collate_fn,
+            pin_memory=True,
+            persistent_workers=config.get("num_workers", 4) > 0,
+            prefetch_factor=4 if config.get("num_workers", 4) > 0 else None,
+        ), True
+
+    # --- Fallback: runtime preprocessing from arcsinh data ---
+    print("[VirTues] No pre-computed data found — applying runtime preprocessing.")
+    print("[VirTues] Hint: Run 'python prepare_virtues_data.py --panel-config "
+          f"{config.get('panel_config', 'configs/all_panels_config.yaml')}' to pre-compute.")
 
     # Load per-marker mean/std from marker_metadata.csv
     metadata_path = config.get("marker_metadata_csv", "configs/marker_metadata.csv")
