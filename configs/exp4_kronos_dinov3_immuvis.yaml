@@ -50,3 +50,4 @@ save_checkpoint_freq: 10
 tags: ["exp4", "kronos", "dinov3", "immuvis", "no-gram"]
 comet_project: "immu-vis"
 comet_workspace: "kugi8412"
+comet_api_key: "V6s4QJ97ca130GE8M4G4MlU5D"
