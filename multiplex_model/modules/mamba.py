@@ -588,6 +588,128 @@ class MambaSwinEncoder(Encoder):
 # ===================================================================
 # Backward compatibility aliases
 # ===================================================================
+# 9. Pure Vision Mamba (ViM) Block — 4-Way Mamba + FFN, no Attention
+# ===================================================================
+
+@BLOCK_REGISTRY.register("vim")
+class VimBlock(Block):
+    """Pure Vision Mamba block: 4-way cross-scan SSM + FFN (no window attention).
+
+    Each block applies:
+        1. LayerNorm -> FourWayScan Mamba (global, all spatial positions)
+        2. LayerNorm -> FFN with depthwise conv
+
+    Unlike MambaSwinBlock, this block does NOT include window attention,
+    making it a pure state-space model for isotropic ViM architectures.
+    """
+
+    def __init__(
+        self,
+        dim: int,
+        d_state: int = 16,
+        d_conv: int = 4,
+        expand: int = 2,
+        ffn_expand: int = 4,
+        drop_path: float = 0.0,
+    ):
+        super().__init__()
+        self.norm_mamba = LayerNorm(dim, data_format="channels_first")
+        self.mamba = FourWayScan(dim, d_state=d_state, d_conv=d_conv, expand=expand)
+
+        self.norm_ffn = LayerNorm(dim, data_format="channels_first")
+        self.ffn = MambaSwinFFN(dim, expand=ffn_expand)
+
+        self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = x + self.drop_path(self.mamba(self.norm_mamba(x)))
+        x = x + self.drop_path(self.ffn(self.norm_ffn(x)))
+        return x
+
+
+# ===================================================================
+# 10. Vision Mamba (ViM) Encoder — Isotropic or Hierarchical
+# ===================================================================
+
+@ENCODER_REGISTRY.register("vim")
+class VimEncoder(Encoder):
+    """Pure Vision Mamba encoder using 4-way cross-scan SSM blocks.
+
+    Supports both isotropic (single-stage) and hierarchical (multi-stage)
+    configurations via layers_blocks/embedding_dims lists.
+    Does NOT use window attention — purely SSM-based.
+    """
+
+    def __init__(
+        self,
+        input_channels: int,
+        layers_blocks: list[int],
+        embedding_dims: list[int],
+        stem: bool = True,
+        patch_size: int = 2,
+        block_parameters: dict | None = None,
+    ):
+        super().__init__()
+        bp = block_parameters.copy() if block_parameters else {}
+
+        # Build patch embeddings (stem + downsampling)
+        self.patch_embeds = nn.ModuleList()
+        if stem:
+            self.patch_embeds.append(nn.Sequential(
+                nn.Conv2d(input_channels, embedding_dims[0],
+                          kernel_size=patch_size, stride=patch_size),
+                LayerNorm(embedding_dims[0], data_format="channels_first"),
+            ))
+        else:
+            self.patch_embeds.append(nn.Identity())
+
+        for i, out_dim in enumerate(embedding_dims[1:]):
+            in_dim = embedding_dims[i]
+            self.patch_embeds.append(nn.Sequential(
+                LayerNorm(in_dim, data_format="channels_first"),
+                nn.Conv2d(in_dim, out_dim, kernel_size=2, stride=2),
+            ))
+
+        # Build stages with stochastic depth schedule
+        total_blocks = sum(layers_blocks)
+        dp_rates = [x.item() for x in torch.linspace(0, bp.get("drop_path", 0.0), total_blocks)]
+        block_idx = 0
+
+        self.stages = nn.ModuleList()
+        for stage_i, (n_blocks, dim) in enumerate(zip(layers_blocks, embedding_dims)):
+            stage = []
+            for i in range(n_blocks):
+                blk_kwargs = {
+                    "dim": dim,
+                    "d_state": bp.get("d_state", 16),
+                    "d_conv": bp.get("d_conv", 4),
+                    "expand": bp.get("expand", 2),
+                    "ffn_expand": bp.get("ffn_expand", 4),
+                    "drop_path": dp_rates[block_idx],
+                }
+                stage.append(VimBlock(**blk_kwargs))
+                block_idx += 1
+            self.stages.append(nn.Sequential(*stage))
+
+    def forward(self, x: torch.Tensor, return_features: bool = False) -> dict:
+        outputs = {}
+        features = []
+
+        for patch_embed, stage in zip(self.patch_embeds, self.stages):
+            x = patch_embed(x)
+            x = stage(x)
+            if return_features:
+                features.append(x)
+
+        outputs["output"] = x
+        if return_features:
+            outputs["features"] = features
+        return outputs
+
+
+# ===================================================================
+# Backward compatibility aliases
+# ===================================================================
 
 CrossScanMambaBlock = MambaSwinBlock
 VisionMambaEncoder = MambaSwinEncoder

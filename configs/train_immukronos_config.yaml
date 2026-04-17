@@ -76,7 +76,7 @@ use_gram_loss: false
 # ==========================================
 # from_checkpoint: null
 checkpoints_dir: "checkpoints"
-save_checkpoint_freq: 5
+save_checkpoint_freq: 10
 
 comet_project: "immu-vis"
 comet_workspace: "kugi8412"

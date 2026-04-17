@@ -93,6 +93,8 @@ from .mamba import (
     MambaSwinEncoder,
     FourWayScan,
     SelectiveSSM,
+    VimBlock,
+    VimEncoder,
 )
 
 # PixelCNN for latent density estimation

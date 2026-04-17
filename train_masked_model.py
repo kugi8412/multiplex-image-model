@@ -447,8 +447,32 @@ if __name__ == "__main__":
     with open(config_path, "r") as f:
         raw_config = yaml.load(f)
 
+    # Detect wrong config type early
+    if "model_name" in raw_config and "out_dim" in raw_config:
+        KRONOS_KEYS = ["global_crops_scale", "teacher_temp", "teacher_momentum"]
+        if any(k in raw_config for k in KRONOS_KEYS):
+            print(f"ERROR: '{config_path}' looks like a KRONOS DINO config "
+                  f"(has model_name, out_dim, teacher_temp).\n"
+                  f"Use 'python train_kronos_dino.py {config_path}' or "
+                  f"'python train_kronos_dinov2v3.py {config_path}' instead.",
+                  file=sys.stderr)
+            sys.exit(1)
+
+    if "encoder" not in raw_config or "decoder" not in raw_config:
+        print(f"ERROR: '{config_path}' is missing 'encoder' and/or 'decoder' keys.\n"
+              f"This script requires a masked-model config with encoder/decoder architecture.\n"
+              f"See configs/train_dino_finetune.yaml for an example.",
+              file=sys.stderr)
+        sys.exit(1)
+
     # Validate configuration using Pydantic model
-    config = TrainingConfig(**raw_config)
+    from pydantic import ValidationError
+    try:
+        config = TrainingConfig(**raw_config)
+    except ValidationError as e:
+        print(f"ERROR: Config validation failed for '{config_path}':\n{e}",
+              file=sys.stderr)
+        sys.exit(1)
 
     device = config.device
     print(f"Using device: {device}")

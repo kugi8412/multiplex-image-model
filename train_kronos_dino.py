@@ -35,6 +35,7 @@ from multiplex_model.utils import init_experiment, finish_experiment, get_run_na
 
 from multiplex_model.kronos.vision_transformer import vit_small, vit_base, vit_large
 from multiplex_model.kronos.dino_head import DINOHead
+from train_kronos_dinov2v3 import resolve_marker_embeddings, build_tokenizer_from_marker_ids
 
 
 # -------------------------------------------
@@ -215,12 +216,34 @@ def main():
     with open(args.config, "r") as f:
         config = yaml.load(f)
 
+    # Validate this is a KRONOS DINO config, not a masked-model config
+    REQUIRED_KEYS = ["global_crops_scale", "global_crops_size", "local_crops_scale",
+                     "local_crops_size", "global_crops_number", "local_crops_number",
+                     "model_name", "out_dim", "teacher_temp", "teacher_momentum"]
+    missing = [k for k in REQUIRED_KEYS if k not in config]
+    if missing:
+        # Check if it looks like a masked-model config (has encoder/decoder)
+        if "encoder" in config or "decoder" in config:
+            raise SystemExit(
+                f"ERROR: '{args.config}' is a masked-model config (has encoder/decoder),\n"
+                f"but you ran train_kronos_dino.py which needs DINO multi-crop config keys.\n"
+                f"Use 'python train_masked_model.py {args.config}' instead.\n"
+                f"Missing keys: {missing}"
+            )
+        raise SystemExit(
+            f"ERROR: Config '{args.config}' is missing required keys: {missing}\n"
+            f"See configs/train_kronos_config.yaml for an example."
+        )
+
     device = torch.device(args.device or config.get("device", "cuda"))
     print(f"Using device: {device}")
 
-    # ---- Data ----
+    # ---- Marker embedding resolution ----
     PANEL_CONFIG = YAML().load(open(config["panel_config"]))
-    TOKENIZER = YAML().load(open(config["tokenizer_config"]))
+    TOKENIZER_RAW = YAML().load(open(config["tokenizer_config"]))
+
+    marker_id_map, num_markers = resolve_marker_embeddings(config, TOKENIZER_RAW)
+    TOKENIZER, num_markers = build_tokenizer_from_marker_ids(TOKENIZER_RAW, marker_id_map)
 
     train_transform = SpatialProteomicsMultiCrop(
         global_scale=config["global_crops_scale"],
@@ -256,7 +279,6 @@ def main():
     )
 
     # Model for finetune
-    num_markers = len(TOKENIZER)
     model_name = config["model_name"]
     patch_size = config.get("patch_size", 16)
     img_size = config.get("global_crops_size", [128, 128])
@@ -265,6 +287,7 @@ def main():
 
     backbone_kwargs = dict(
         patch_size=patch_size,
+        stride_size=patch_size,  # non-overlapping patches (standard ViT)
         num_markers=num_markers,
         img_size=img_size,
     )

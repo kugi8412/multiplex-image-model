@@ -25,6 +25,7 @@ Usage::
 """
 
 import argparse
+import csv
 import os
 
 import comet_ml  # noqa: F401
@@ -48,6 +49,117 @@ from multiplex_model.data import DatasetFromTIFF, PanelBatchSampler
 from multiplex_model.utils import init_experiment, finish_experiment, get_run_name
 from multiplex_model.kronos.vision_transformer import vit_small, vit_base, vit_large, vit_giant2
 from multiplex_model.kronos.dino_head import DINOHead
+
+
+# -------------------------------------------
+# 0. MARKER EMBEDDING ID RESOLUTION
+# -------------------------------------------
+
+def load_marker_metadata(metadata_csv_path):
+    """Load marker_metadata.csv and return {marker_name: marker_id} mapping.
+
+    The CSV is expected to have columns: marker_name, marker_id, marker_mean, marker_std.
+    """
+    marker_id_map = {}
+    with open(metadata_csv_path, "r", newline="") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            name = row["marker_name"].strip().strip('"')
+            mid = int(row["marker_id"])
+            marker_id_map[name] = mid
+    return marker_id_map
+
+
+def build_custom_marker_ids_from_tokenizer(tokenizer):
+    """Create sequential integer marker IDs from the tokenizer in sorted order.
+
+    Returns {marker_name: id} mapping with IDs assigned in alphabetical order
+    of marker names starting from 0.
+    """
+    sorted_names = sorted(tokenizer.keys(), key=str.lower)
+    return {name: idx for idx, name in enumerate(sorted_names)}
+
+
+def resolve_marker_embeddings(config, tokenizer):
+    """Resolve marker embedding IDs for the KRONOS backbone.
+
+    Strategy:
+      1. If marker_metadata.csv (path from config or default) exists on disk,
+         load it and use its ``marker_id`` values.  The backbone's
+         ``num_markers`` will be ``max(ids) + 1`` so that the sinusoidal
+         look-up table covers all IDs.
+      2. Otherwise, build fresh sequential IDs from the tokenizer file,
+         ordered alphabetically, and persist them to a CSV so subsequent
+         runs are deterministic.
+
+    Returns:
+        marker_id_map (dict[str, int]): marker_name -> integer ID.
+        num_markers (int): total number of marker slots for the sinusoidal
+            embedding table (>= max(id)+1).
+    """
+    metadata_path = config.get("marker_metadata_csv", "configs/marker_metadata.csv")
+
+    if os.path.isfile(metadata_path):
+        print(f"[Marker IDs] Loading from existing metadata: {metadata_path}")
+        marker_id_map = load_marker_metadata(metadata_path)
+    else:
+        print(f"[Marker IDs] {metadata_path} not found — creating custom IDs "
+              f"from tokenizer ({len(tokenizer)} markers, alphabetical order).")
+        marker_id_map = build_custom_marker_ids_from_tokenizer(tokenizer)
+
+        # Persist so future runs are reproducible
+        out_path = metadata_path
+        os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+        with open(out_path, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["marker_name", "marker_id", "marker_mean", "marker_std"])
+            for name in sorted(marker_id_map.keys(), key=str.lower):
+                writer.writerow([name, marker_id_map[name], 0.0, 1.0])
+        print(f"[Marker IDs] Saved new metadata to {out_path}")
+
+    num_markers = max(marker_id_map.values()) + 1
+    print(f"[Marker IDs] {len(marker_id_map)} markers, "
+          f"sinusoidal table size = {num_markers}")
+    return marker_id_map, num_markers
+
+
+def build_tokenizer_from_marker_ids(tokenizer, marker_id_map):
+    """Re-map the tokenizer values to the resolved marker IDs.
+
+    Returns a new dict {marker_name: resolved_id} for every marker present
+    in both the tokenizer and the marker_id_map.  Markers in the tokenizer
+    that are NOT in the map are assigned new sequential IDs starting from
+    ``max(marker_id_map.values()) + 1`` so that indices stay within the
+    sinusoidal embedding table.
+
+    Returns:
+        new_tokenizer (dict): {marker_name: resolved_id}
+        num_markers (int): updated total marker slots (accounts for any
+            newly assigned IDs).
+    """
+    new_tokenizer = {}
+    missing = []
+    next_free_id = max(marker_id_map.values()) + 1 if marker_id_map else 0
+    for name, old_id in tokenizer.items():
+        if name in marker_id_map:
+            new_tokenizer[name] = marker_id_map[name]
+        else:
+            # Try case-insensitive lookup
+            found = False
+            for map_name, map_id in marker_id_map.items():
+                if map_name.lower() == name.lower():
+                    new_tokenizer[name] = map_id
+                    found = True
+                    break
+            if not found:
+                new_tokenizer[name] = next_free_id
+                next_free_id += 1
+                missing.append(name)
+    if missing:
+        print(f"[Marker IDs] WARNING: {len(missing)} tokenizer markers not found "
+              f"in metadata, assigned new IDs: {missing[:10]}{'...' if len(missing)>10 else ''}")
+    updated_num_markers = next_free_id
+    return new_tokenizer, updated_num_markers
 
 
 # -------------------------------------------
@@ -342,6 +454,7 @@ def build_backbone(model_name, num_markers, img_size, patch_size, drop_path_rate
     cfg = MODEL_CONFIGS[model_name]
     backbone = cfg["factory"](
         patch_size=patch_size,
+        stride_size=patch_size,  # non-overlapping patches (standard ViT)
         num_markers=num_markers,
         img_size=img_size,
         drop_path_rate=drop_path_rate,
@@ -367,6 +480,24 @@ def main():
     with open(args.config, "r") as f:
         config = yaml.load(f)
 
+    # Validate this is a KRONOS DINOv2/v3 config, not a masked-model config
+    REQUIRED_KEYS = ["global_crops_scale", "global_crops_size", "local_crops_scale",
+                     "local_crops_size", "model_name", "out_dim",
+                     "teacher_temp", "teacher_momentum"]
+    missing = [k for k in REQUIRED_KEYS if k not in config]
+    if missing:
+        if "encoder" in config or "decoder" in config:
+            raise SystemExit(
+                f"ERROR: '{args.config}' is a masked-model config (has encoder/decoder),\n"
+                f"but you ran train_kronos_dinov2v3.py which needs DINO multi-crop config.\n"
+                f"Use 'python train_masked_model.py {args.config}' instead.\n"
+                f"Missing keys: {missing}"
+            )
+        raise SystemExit(
+            f"ERROR: Config '{args.config}' is missing required keys: {missing}\n"
+            f"See configs/train_kronos_dinov2_config.yaml for an example."
+        )
+
     device = torch.device(args.device or config.get("device", "cuda"))
     training_mode = config.get("training_mode", "dinov2")
     assert training_mode in ("dinov2", "dinov3"), (
@@ -374,10 +505,12 @@ def main():
     )
     print(f"Training mode: {training_mode.upper()} | Device: {device}")
 
-    # ---- Data ----
+    # ---- Marker embedding resolution ----
     PANEL_CONFIG = YAML().load(open(config["panel_config"]))
-    TOKENIZER = YAML().load(open(config["tokenizer_config"]))
-    num_markers = len(TOKENIZER)
+    TOKENIZER_RAW = YAML().load(open(config["tokenizer_config"]))
+
+    marker_id_map, num_markers = resolve_marker_embeddings(config, TOKENIZER_RAW)
+    TOKENIZER, num_markers = build_tokenizer_from_marker_ids(TOKENIZER_RAW, marker_id_map)
 
     n_global = config.get("global_crops_number", 2)
     n_local = config.get("local_crops_number", 8)
@@ -583,9 +716,8 @@ def main():
                     # === DINOv3: CLS + iBOT + KoLeo ===
                     B = crops[0].shape[0]
                     C_markers = channel_ids.shape[1]
-                    h_p = crops[0].shape[2] // patch_size
-                    w_p = crops[0].shape[3] // patch_size
-                    n_spatial = h_p * w_p
+                    # Use backbone's actual patch count per marker (accounts for stride)
+                    n_spatial = student.backbone.patch_embed.num_patches
 
                     # Generate spatial iBOT masks for each global crop independently
                     ibot_masks_per_crop = [
