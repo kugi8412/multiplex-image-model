@@ -1,4 +1,5 @@
 # Exp 7a: Mamba Isotropic — Flat 16-layer ViM encoder (768d)
+# Comparable to ViT isotropic: same depth, embed dim, hyperkernel, decoder.
 # Train with: python train_masked_model.py configs/exp7a_mamba_isotropic.yaml
 encoder:
     ma_layers_blocks: []
@@ -13,9 +14,9 @@ encoder:
          block_parameters:
           d_state: 16
           d_conv: 4
-          expand: 1
+          expand: 2
 
-    hyperkernel_config:
+    hyperkernel:
       kernel_size: 8
       padding: 0
       stride: 8
@@ -30,7 +31,7 @@ decoder:
     module_parameters:
        num_heads: 12
 
-  hyperkernel_config:
+  hyperkernel:
       kernel_size: 1
       padding: 0
       stride: 1
@@ -50,7 +51,7 @@ final_lr: 8e-6
 weight_decay: 0.05
 gradient_accumulation_steps: 1
 epochs: 200
-frac_warmup_steps: 0.3
+frac_warmup_steps: 0.1
 min_channels_frac: 0.75
 spatial_masking_ratio: 0.6
 fully_masked_channels_max_frac: 0.5
@@ -67,6 +68,6 @@ activation_beta: 2.0
 uncertainty_method: beta_nll
 
 # Comet.ml logging
-tags: ["exp7a", "mamba", "isotropic", "200epochs"]
+tags: ["exp7a", "mamba", "isotropic", "vim", "200epochs"]
 comet_project: "immu-vis"
 comet_workspace: "kugi8412"

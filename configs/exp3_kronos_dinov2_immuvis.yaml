@@ -26,17 +26,17 @@ epochs: 200
 batch_size: 8
 gradient_accumulation_steps: 128
 
-lr: 0.004
+lr: 0.001
 final_lr: 1.0e-6
-warmup_epochs: 10
+warmup_epochs: 20
 weight_decay: 0.04
 weight_decay_final: 0.4
-clip_grad: 3.0
+clip_grad: 1.0
 
-warmup_teacher_temp_epochs: 30
+warmup_teacher_temp_epochs: 40
 warmup_teacher_temp: 0.04
 teacher_temp: 0.07
-teacher_momentum: 0.992
+teacher_momentum: 0.996
 
 from_checkpoint: null
 checkpoints_dir: "checkpoints/exp3_dinov2_immuvis"
