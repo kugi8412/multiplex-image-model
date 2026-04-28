@@ -712,3 +712,4 @@ class VimEncoder(Encoder):
 # ===================================================================
 
 CrossScanMambaBlock = MambaSwinBlock
+VisionMambaEncoder = MambaSwinEncoder
