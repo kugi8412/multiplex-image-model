@@ -26,7 +26,9 @@ Usage::
 
 import argparse
 import csv
+import functools
 import os
+import random
 
 import comet_ml  # noqa: F401
 import numpy as np
@@ -408,13 +410,29 @@ class DINODatasetWrapper(torch.utils.data.Dataset):
         return crops, channel_ids, dataset_name, img_path
 
 
-def dino_collate_fn(batch):
-    """Groups crop lists into a proper batch format."""
+def dino_collate_fn(batch, channel_fraction=None):
+    """Groups crop lists into a proper batch format.
+
+    If channel_fraction is set (e.g. (0.75, 1.0)), randomly drops a fraction
+    of channels uniformly across the entire batch.  All samples in a
+    PanelBatchSampler batch share the same marker set, so the same channel
+    subset is applied to every sample.
+    """
     num_crops = len(batch[0][0])
     collated_crops = [torch.stack([item[0][i] for item in batch]) for i in range(num_crops)]
     channel_ids = torch.stack([item[1] for item in batch])
     dataset_names = [item[2] for item in batch]
     img_paths = [item[3] for item in batch]
+
+    if channel_fraction is not None:
+        C = collated_crops[0].shape[1]  # number of channels
+        frac = random.uniform(*channel_fraction)
+        n_keep = max(1, int(C * frac))
+        if n_keep < C:
+            perm = torch.randperm(C)[:n_keep].sort().values
+            collated_crops = [crop[:, perm] for crop in collated_crops]
+            channel_ids = channel_ids[:, perm]
+
     return collated_crops, channel_ids, dataset_names, img_paths
 
 
@@ -539,11 +557,20 @@ def main():
     train_dataset = DINODatasetWrapper(train_dataset_base, train_transform)
     train_batch_sampler = PanelBatchSampler(train_dataset_base, config["batch_size"])
 
+    # ---- Channel dropout ----
+    channel_fraction = config.get("channel_fraction", None)
+    if channel_fraction is not None:
+        channel_fraction = tuple(channel_fraction)
+        print(f"Channel dropout enabled: keep fraction {channel_fraction}")
+        collate_fn = functools.partial(dino_collate_fn, channel_fraction=channel_fraction)
+    else:
+        collate_fn = dino_collate_fn
+
     train_dataloader = DataLoader(
         train_dataset,
         batch_sampler=train_batch_sampler,
         num_workers=config.get("num_workers", 4),
-        collate_fn=dino_collate_fn,
+        collate_fn=collate_fn,
         pin_memory=True,
         persistent_workers=config.get("num_workers", 4) > 0,
         prefetch_factor=4 if config.get("num_workers", 4) > 0 else None,

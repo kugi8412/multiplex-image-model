@@ -354,24 +354,36 @@ def build_immuvis_dataloader(config, PANEL_CONFIG, TOKENIZER, train_transform):
 # 4b. VIRTUES-LITE ON ARCSINH DATA
 # -------------------------------------------
 
-def _check_virtues_precomputed(panel_config: dict, suffix: str = "_virtues") -> str | None:
+def _check_virtues_precomputed(panel_config: dict, suffix: str = "_virtues",
+                               explicit_path: str | None = None) -> str | None:
     """Check if VirTues-preprocessed data already exists.
 
-    Looks for a directory at {original_train_path}{suffix}/ with the same
-    dataset subdirectories containing .npy files.
+    Looks for data at either an explicit path or {original_train_path}{suffix}/
+    with the same dataset subdirectories containing .npy files.
+
+    Args:
+        panel_config: Panel configuration dict with 'paths' and 'datasets'.
+        suffix: Suffix to append to original data path.
+        explicit_path: If set, check this path directly (for --output-root style).
 
     Returns:
         The path to precomputed data root if found, otherwise None.
     """
+    candidates = []
+    if explicit_path is not None:
+        # Check explicit_path/train/ structure
+        candidates.append(os.path.join(explicit_path, "train"))
+        candidates.append(explicit_path)
     train_path = panel_config["paths"].get("train", "")
-    virtues_path = train_path.rstrip("/") + suffix
-    if not os.path.isdir(virtues_path):
-        return None
-    # Check that at least one dataset has files
-    for dataset in panel_config.get("datasets", []):
-        imgs_dir = os.path.join(virtues_path, dataset, "imgs")
-        if os.path.isdir(imgs_dir) and len(glob(os.path.join(imgs_dir, "*.npy"))) > 0:
-            return virtues_path
+    candidates.append(train_path.rstrip("/") + suffix)
+
+    for virtues_path in candidates:
+        if not os.path.isdir(virtues_path):
+            continue
+        for dataset in panel_config.get("datasets", []):
+            imgs_dir = os.path.join(virtues_path, dataset, "imgs")
+            if os.path.isdir(imgs_dir) and len(glob(os.path.join(imgs_dir, "*.npy"))) > 0:
+                return virtues_path
     return None
 
 
@@ -388,7 +400,10 @@ def build_arcsinh_virtues_dataloader(config, PANEL_CONFIG, TOKENIZER,
     from multiplex_model.data import DatasetFromTIFF, PanelBatchSampler
 
     virtues_suffix = config.get("virtues_data_suffix", "_virtues")
-    precomputed_path = _check_virtues_precomputed(PANEL_CONFIG, suffix=virtues_suffix)
+    virtues_data_root = config.get("virtues_data_root", None)
+    precomputed_path = _check_virtues_precomputed(
+        PANEL_CONFIG, suffix=virtues_suffix, explicit_path=virtues_data_root
+    )
 
     if precomputed_path is not None:
         print(f"[VirTues] Found pre-computed data at: {precomputed_path}")

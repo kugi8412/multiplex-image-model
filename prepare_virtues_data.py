@@ -133,8 +133,12 @@ def process_dataset(
     stats_dir: str,
     file_extension: str = "npy",
     blur_sigma: float = 1.0,
+    quantile_samples_per_image: int = 2048,
 ) -> dict:
     """Process all images in a single dataset directory.
+
+    Memory-efficient streaming approach: processes one image at a time
+    across three passes (quantile sampling, mean/std computation, preprocessing).
 
     Args:
         input_dir: Path to {split}/{dataset}/imgs/ with arcsinh .npy files.
@@ -142,6 +146,8 @@ def process_dataset(
         stats_dir: Path to write quantiles/means/stds CSVs.
         file_extension: File extension (default 'npy').
         blur_sigma: Gaussian blur sigma.
+        quantile_samples_per_image: Number of pixels sampled per image for
+            quantile estimation (default 2048). Total samples = this * num_images.
 
     Returns:
         Dictionary with 'quantiles', 'means', 'stds' arrays.
@@ -151,19 +157,51 @@ def process_dataset(
     if not file_paths:
         return None
 
-    print(f"    Loading {len(file_paths)} images and inverting arcsinh...")
-    raw_images = []
-    for fp in tqdm(file_paths, desc="    Inverting", leave=False):
-        arcsinh_data = np.load(fp)
-        raw = invert_arcsinh(arcsinh_data)
-        raw_images.append(raw)
+    # Determine number of channels from first image
+    first = np.load(file_paths[0])
+    C = first.shape[0]
+    del first
 
-    # Compute statistics on raw data
-    print("    Computing 99th percentile quantiles...")
-    quantiles = compute_tissue_quantiles(raw_images, quantile=0.99)
+    # --- Pass 1: Quantile estimation via random sampling (one image at a time) ---
+    print(f"    Pass 1/3: Sampling {len(file_paths)} images for quantile estimation...")
+    rng = np.random.default_rng(42)
+    samples = [[] for _ in range(C)]
 
-    print("    Computing log1p mean/std...")
-    means, stds = compute_log_stats(raw_images, quantiles)
+    for fp in tqdm(file_paths, desc="    Quantile sampling", leave=False):
+        raw = invert_arcsinh(np.load(fp))  # (C, H, W)
+        flat = raw.reshape(C, -1)  # (C, pixels)
+        n_pix = flat.shape[1]
+        idx = rng.choice(n_pix, min(quantile_samples_per_image, n_pix), replace=False)
+        for c in range(C):
+            samples[c].append(flat[c, idx])
+        del raw, flat
+
+    quantiles = np.zeros(C, dtype=np.float32)
+    for c in range(C):
+        quantiles[c] = np.quantile(np.concatenate(samples[c]), 0.99)
+    del samples
+
+    # --- Pass 2: Streaming mean/std in log1p space (one image at a time) ---
+    print("    Pass 2/3: Computing log1p mean/std (streaming)...")
+    running_sum = np.zeros(C, dtype=np.float64)
+    running_sq = np.zeros(C, dtype=np.float64)
+    total_pixels = 0
+
+    for fp in tqdm(file_paths, desc="    Computing stats", leave=False):
+        raw = invert_arcsinh(np.load(fp))
+        q = quantiles[:, np.newaxis, np.newaxis]
+        clipped = np.clip(raw, 0, q)
+        logged = np.log1p(clipped)
+        flat = logged.reshape(C, -1)
+        running_sum += flat.sum(axis=1)
+        running_sq += (flat ** 2).sum(axis=1)
+        total_pixels += flat.shape[1]
+        del raw, clipped, logged, flat
+
+    means = (running_sum / total_pixels).astype(np.float32)
+    variance = running_sq / total_pixels - (running_sum / total_pixels) ** 2
+    stds = np.sqrt(np.maximum(variance, 0)).astype(np.float32)
+    stds = np.where(stds < 1e-8, 1.0, stds)
 
     # Save statistics
     os.makedirs(stats_dir, exist_ok=True)
@@ -171,16 +209,15 @@ def process_dataset(
     np.savetxt(os.path.join(stats_dir, "means.csv"), means, delimiter=",")
     np.savetxt(os.path.join(stats_dir, "stds.csv"), stds, delimiter=",")
 
-    # Preprocess and save each image
+    # --- Pass 3: Preprocess and save each image individually ---
     os.makedirs(output_dir, exist_ok=True)
-    print(f"    Preprocessing and saving to {output_dir}...")
-    for fp, raw in tqdm(
-        zip(file_paths, raw_images), total=len(file_paths),
-        desc="    Processing", leave=False
-    ):
+    print(f"    Pass 3/3: Preprocessing and saving to {output_dir}...")
+    for fp in tqdm(file_paths, total=len(file_paths),
+                   desc="    Processing", leave=False):
+        raw = invert_arcsinh(np.load(fp))
         preprocessed = preprocess_image(raw, quantiles, means, stds, blur_sigma)
-        out_name = os.path.basename(fp)
-        np.save(os.path.join(output_dir, out_name), preprocessed)
+        np.save(os.path.join(output_dir, os.path.basename(fp)), preprocessed)
+        del raw, preprocessed
 
     return {"quantiles": quantiles, "means": means, "stds": stds}
 
@@ -195,9 +232,16 @@ def main():
         help="Path to panel config YAML",
     )
     parser.add_argument(
+        "--output-root",
+        default=None,
+        help="Absolute output root directory. If set, output is written to "
+             "{output_root}/{split}/{dataset}/imgs/ instead of next to the source data.",
+    )
+    parser.add_argument(
         "--output-suffix",
         default="_virtues",
-        help="Suffix to append to original data path for output (default: _virtues)",
+        help="Suffix to append to original data path for output (default: _virtues). "
+             "Ignored when --output-root is set.",
     )
     parser.add_argument(
         "--file-extension",
@@ -220,8 +264,11 @@ def main():
     paths = panel_config["paths"]
 
     for split, split_path in paths.items():
-        output_root = split_path.rstrip("/") + args.output_suffix
-        stats_root = output_root + "/stats"
+        if args.output_root is not None:
+            output_root = os.path.join(args.output_root, split)
+        else:
+            output_root = split_path.rstrip("/") + args.output_suffix
+        stats_root = os.path.join(output_root, "stats")
         print(f"\n=== Processing split: {split} ===")
         print(f"  Input:  {split_path}")
         print(f"  Output: {output_root}")
