@@ -223,8 +223,8 @@ def main():
         encoder_config=config.encoder_config.model_dump(),
         decoder_config=decoder_cfg,
     )
-    ckpt = torch.load(args.encoder_checkpoint, map_location="cpu", weights_only=True)
-    model.load_state_dict(ckpt.get("model_state_dict", ckpt))
+    ckpt = torch.load(args.encoder_checkpoint, map_location="cpu", weights_only=False)
+    model.load_state_dict(ckpt.get("model_state_dict", ckpt), strict=False)
     model = model.to(device)
     model.eval()
     for p in model.parameters():

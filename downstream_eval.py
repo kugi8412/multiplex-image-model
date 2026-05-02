@@ -67,21 +67,44 @@ warnings.filterwarnings("ignore")
 # ============================================================================
 
 def load_embeddings(embeddings_dir, split="all"):
-    """Load all emb_*.npy files from a directory.
+    """Load embeddings from a directory.
 
-    Each file is expected to be saved by generate_embeddings.py as:
-        {"embeddings": np.ndarray, "labels": np.ndarray (optional)}
+    Supports two formats:
+      1) Panel-config mode: embeddings_{split}.npz with 'embeddings', 'paths', 'datasets' arrays
+      2) Legacy mode: emb_*.npy files, each with {"embeddings": ..., "labels": ...}
 
     Returns:
         embeddings: (N, D) array
         labels: (N,) array or None
         file_names: list of source file basenames
     """
+    # Try panel-config format first (embeddings_*.npz)
+    npz_files = sorted(f for f in os.listdir(embeddings_dir)
+                       if f.startswith("embeddings_") and f.endswith(".npz"))
+    if npz_files:
+        emb_list, name_list, dataset_list = [], [], []
+        for fname in npz_files:
+            path = os.path.join(embeddings_dir, fname)
+            data = np.load(path, allow_pickle=True)
+            emb_list.append(data["embeddings"])
+            if "paths" in data:
+                name_list.extend(data["paths"].tolist())
+            else:
+                name_list.extend([fname] * len(data["embeddings"]))
+            if "datasets" in data:
+                dataset_list.extend(data["datasets"].tolist())
+        embeddings = np.concatenate(emb_list, axis=0)
+        return embeddings, None, name_list
+
+    # Fall back to legacy emb_*.npy format
     emb_list, label_list, name_list = [], [], []
 
     files = sorted(f for f in os.listdir(embeddings_dir) if f.startswith("emb_") and f.endswith(".npy"))
     if not files:
-        raise FileNotFoundError(f"No emb_*.npy files found in {embeddings_dir}")
+        raise FileNotFoundError(
+            f"No embeddings found in {embeddings_dir}. "
+            f"Expected embeddings_*.npz (panel-config mode) or emb_*.npy (legacy mode)."
+        )
 
     for fname in files:
         path = os.path.join(embeddings_dir, fname)
@@ -414,29 +437,93 @@ def evaluate_classifier(clf, scaler, X_test, y_test):
 # Virtual Staining (MLP Decoder on Frozen Embeddings)
 # ============================================================================
 
-def load_patch_data(patches_dir, tokenizer_path=None, skip_markers=None):
-    """Load patch images for virtual staining evaluation.
+def _load_npz_virtual_stain_data(embeddings_dir, panel_config_path, tokenizer_path, skip_set):
+    """Load embeddings from npz and compute per-marker targets from stored patch paths.
 
-    Expects .npy files with shape (C, H, W) or .npz with 'patches' and 'channel_ids'.
-    Returns list of (patches_array, channel_ids_array, filename) tuples.
+    Each image may come from a different panel (different channels).  We map all
+    channels to a common tokenizer vocabulary and produce a binary mask indicating
+    which markers are present for each sample.
+
+    Returns (embeddings, targets, masks, inv_tokenizer) or (None,)*4 on failure.
     """
-    skip_markers = set(skip_markers or [])
-    files = sorted(
-        f for f in os.listdir(patches_dir)
-        if (f.endswith(".npy") or f.endswith(".npz")) and not f.startswith("emb_")
+    from ruamel.yaml import YAML
+
+    npz_files = sorted(
+        f for f in os.listdir(embeddings_dir)
+        if f.startswith("embeddings_") and f.endswith(".npz")
     )
-    return files
+    if not npz_files:
+        return None, None, None, None
+
+    # Gather all npz data
+    emb_parts, path_parts, ds_parts = [], [], []
+    for fname in npz_files:
+        data = np.load(os.path.join(embeddings_dir, fname), allow_pickle=True)
+        emb_parts.append(data["embeddings"])
+        path_parts.extend(data["paths"].tolist())
+        ds_parts.extend(data["datasets"].tolist())
+
+    embeddings = np.concatenate(emb_parts, axis=0)
+
+    yaml = YAML()
+    with open(panel_config_path) as fh:
+        panel_config = yaml.load(fh)
+    with open(tokenizer_path) as fh:
+        tokenizer = yaml.load(fh)
+    inv_tokenizer = {v: k for k, v in tokenizer.items()}
+
+    # channel_ids per dataset from panel config
+    ch_ids_map = {}
+    for ds_name in panel_config.get("datasets", []):
+        markers = panel_config.get("markers", {}).get(ds_name, [])
+        ch_ids_map[ds_name] = [tokenizer[m] for m in markers if m in tokenizer]
+
+    M = len(tokenizer)
+    N = len(embeddings)
+    targets = np.zeros((N, M), dtype=np.float32)
+    masks = np.zeros((N, M), dtype=bool)
+    valid = np.ones(N, dtype=bool)
+
+    for i, (path, ds_name) in enumerate(zip(path_parts, ds_parts)):
+        path, ds_name = str(path), str(ds_name)
+        if not os.path.exists(path):
+            valid[i] = False
+            continue
+        try:
+            patch = np.load(path)
+        except Exception:
+            valid[i] = False
+            continue
+        if patch.ndim < 3:
+            valid[i] = False
+            continue
+
+        means = patch.mean(axis=(1, 2))
+        ch_ids = ch_ids_map.get(ds_name, [])
+        for c_idx, ch_id in enumerate(ch_ids):
+            if c_idx < len(means):
+                marker_name = inv_tokenizer.get(ch_id, "")
+                if marker_name not in skip_set:
+                    targets[i, ch_id] = means[c_idx]
+                    masks[i, ch_id] = True
+
+    embeddings = embeddings[valid]
+    targets = targets[valid]
+    masks = masks[valid]
+    return embeddings, targets, masks, inv_tokenizer
 
 
 def train_virtual_stain_mlp(embeddings_dir, patches_dir, args):
     """Train an MLP decoder head to predict marker intensities from frozen embeddings.
 
-    For each image, we have:
-        - embedding: (D,) from generate_embeddings.py
-        - patch: (C, H, W) original multiplex image
+    Supports two embedding formats:
+      1) Panel-config NPZ: ``embeddings_*.npz`` with ``paths``/``datasets`` arrays.
+         Requires ``--panel-config`` so channel→marker mapping is available.
+         Optionally uses ``--train-embeddings-dir`` for a separate train split.
+      2) Legacy: ``emb_*.npy`` matched 1-to-1 with patch files in ``--patches-dir``.
 
     The MLP predicts the spatial-mean intensity of each marker from the embedding.
-    Evaluation is leave-one-out Pearson correlation per marker.
+    Multi-panel data is handled with a masked MSE loss (only present markers).
     """
     import torch
     import torch.nn as nn
@@ -452,82 +539,141 @@ def train_virtual_stain_mlp(embeddings_dir, patches_dir, args):
     else:
         tokenizer, inv_tokenizer = None, None
 
-    # Collect matched (embedding, patch) pairs
-    emb_files = sorted(f for f in os.listdir(embeddings_dir) if f.startswith("emb_") and f.endswith(".npy"))
+    # ------------------------------------------------------------------
+    # Detect format and load data
+    # ------------------------------------------------------------------
+    npz_files = sorted(
+        f for f in os.listdir(embeddings_dir)
+        if f.startswith("embeddings_") and f.endswith(".npz")
+    )
+    use_masked = False
 
-    all_emb, all_targets, all_channel_ids_list, all_names = [], [], [], []
-    for ef in emb_files:
-        base = ef.replace("emb_", "")
-        patch_path = os.path.join(patches_dir, base)
-        if not os.path.exists(patch_path):
-            npz_path = patch_path.replace(".npy", ".npz")
-            if os.path.exists(npz_path):
-                patch_path = npz_path
+    if npz_files and args.panel_config:
+        # ---- NPZ format (panel-config mode) --------------------------
+        use_masked = True
+        test_emb, test_tgt, test_mask, inv_tokenizer = _load_npz_virtual_stain_data(
+            embeddings_dir, args.panel_config, args.tokenizer_config, skip_set,
+        )
+        if test_emb is None or len(test_emb) == 0:
+            print("[ERROR] No valid data loaded from npz format.")
+            return {}
+
+        train_embeddings_dir = getattr(args, "train_embeddings_dir", None)
+        if train_embeddings_dir:
+            train_emb, train_tgt, train_mask, _ = _load_npz_virtual_stain_data(
+                train_embeddings_dir, args.panel_config, args.tokenizer_config, skip_set,
+            )
+            if train_emb is None or len(train_emb) == 0:
+                print("[ERROR] No valid training data from --train-embeddings-dir.")
+                return {}
+            has_separate_test = True
+        else:
+            has_separate_test = False
+
+        if has_separate_test:
+            all_emb = train_emb
+            all_targets = train_tgt
+            all_masks = train_mask
+        else:
+            all_emb = test_emb
+            all_targets = test_tgt
+            all_masks = test_mask
+
+        N, D = all_emb.shape
+        C_out = all_targets.shape[1]
+        n_present = int(all_masks.any(axis=0).sum())
+        print(f"Loaded {N} training samples (npz), embed_dim={D}, "
+              f"marker vocab={C_out}, active markers={n_present}")
+        if has_separate_test:
+            print(f"Loaded {len(test_emb)} test samples from {embeddings_dir}")
+
+    else:
+        # ---- Legacy emb_*.npy format ---------------------------------
+        emb_files = sorted(
+            f for f in os.listdir(embeddings_dir)
+            if f.startswith("emb_") and f.endswith(".npy")
+        )
+        all_emb_l, all_targets_l, all_channel_ids_list, all_names = [], [], [], []
+        for ef in emb_files:
+            base = ef.replace("emb_", "")
+            patch_path = os.path.join(patches_dir, base)
+            if not os.path.exists(patch_path):
+                npz_path = patch_path.replace(".npy", ".npz")
+                if os.path.exists(npz_path):
+                    patch_path = npz_path
+                else:
+                    continue
+
+            emb_raw = np.load(os.path.join(embeddings_dir, ef), allow_pickle=True)
+            if isinstance(emb_raw, np.ndarray) and emb_raw.ndim == 0:
+                emb_raw = emb_raw.item()
+            emb = emb_raw["embeddings"] if isinstance(emb_raw, dict) else emb_raw
+            if emb.ndim == 2:
+                emb = emb[0]
+
+            patch_raw = np.load(patch_path, allow_pickle=True)
+            if isinstance(patch_raw, np.ndarray) and patch_raw.ndim == 0:
+                patch_raw = patch_raw.item()
+            if isinstance(patch_raw, dict):
+                patch = patch_raw.get("patches", patch_raw.get("data"))
+                ch_ids = patch_raw.get("channel_ids", None)
+            elif isinstance(patch_raw, np.lib.npyio.NpzFile):
+                patch = patch_raw["patches"] if "patches" in patch_raw else patch_raw["arr_0"]
+                ch_ids = patch_raw.get("channel_ids", None)
             else:
+                patch = patch_raw
+                ch_ids = None
+            if patch.ndim == 4:
+                patch = patch[0]
+            if patch.ndim == 2:
                 continue
 
-        # Load embedding
-        emb_raw = np.load(os.path.join(embeddings_dir, ef), allow_pickle=True)
-        if isinstance(emb_raw, np.ndarray) and emb_raw.ndim == 0:
-            emb_raw = emb_raw.item()
-        if isinstance(emb_raw, dict):
-            emb = emb_raw["embeddings"]
-        else:
-            emb = emb_raw
-        if emb.ndim == 2:
-            emb = emb[0]  # take first if batched single
+            target = patch.mean(axis=(1, 2)) if patch.ndim == 3 else patch.mean(axis=-1)
+            all_emb_l.append(emb)
+            all_targets_l.append(target)
+            all_channel_ids_list.append(ch_ids)
+            all_names.append(base)
 
-        # Load patch
-        patch_raw = np.load(patch_path, allow_pickle=True)
-        if isinstance(patch_raw, np.ndarray) and patch_raw.ndim == 0:
-            patch_raw = patch_raw.item()
-        if isinstance(patch_raw, dict):
-            patch = patch_raw.get("patches", patch_raw.get("data"))
-            ch_ids = patch_raw.get("channel_ids", None)
-        elif isinstance(patch_raw, np.lib.npyio.NpzFile):
-            patch = patch_raw["patches"] if "patches" in patch_raw else patch_raw["arr_0"]
-            ch_ids = patch_raw.get("channel_ids", None)
-        else:
-            patch = patch_raw
-            ch_ids = None
+        if not all_emb_l:
+            print("[ERROR] No matched embedding-patch pairs found.")
+            return {}
 
-        if patch.ndim == 4:
-            patch = patch[0]
-        if patch.ndim == 2:
-            continue
+        all_emb = np.stack(all_emb_l, axis=0)
+        all_targets = np.stack(all_targets_l, axis=0)
+        all_masks = None
+        has_separate_test = False
+        N, D = all_emb.shape
+        C_out = all_targets.shape[1]
+        print(f"Loaded {N} samples (legacy), embedding dim={D}, output channels={C_out}")
 
-        # Target: spatial-mean intensity per channel → (C,)
-        target = patch.mean(axis=(1, 2)) if patch.ndim == 3 else patch.mean(axis=-1)
-
-        all_emb.append(emb)
-        all_targets.append(target)
-        all_channel_ids_list.append(ch_ids)
-        all_names.append(base)
-
-    if not all_emb:
-        print("[ERROR] No matched embedding-patch pairs found.")
-        return {}
-
-    all_emb = np.stack(all_emb, axis=0)          # (N, D)
-    all_targets = np.stack(all_targets, axis=0)   # (N, C)
-    N, D = all_emb.shape
-    C_out = all_targets.shape[1]
-    print(f"Loaded {N} samples, embedding dim={D}, output channels={C_out}")
-
-    # Train/val split (80/20)
-    np.random.seed(42)
-    perm = np.random.permutation(N)
-    split = int(0.8 * N)
-    train_idx, val_idx = perm[:split], perm[split:]
+    # ------------------------------------------------------------------
+    # Train / val split
+    # ------------------------------------------------------------------
+    if has_separate_test:
+        train_idx = np.arange(len(all_emb))
+        val_emb_raw = test_emb
+        val_tgt_raw = test_tgt
+        val_mask_raw = test_mask if use_masked else None
+    else:
+        np.random.seed(42)
+        perm = np.random.permutation(N)
+        split_pt = int(0.8 * N)
+        train_idx = perm[:split_pt]
+        val_idx = perm[split_pt:]
+        val_emb_raw = all_emb[val_idx]
+        val_tgt_raw = all_targets[val_idx]
+        val_mask_raw = all_masks[val_idx] if use_masked else None
 
     device = torch.device(args.device)
 
     # Normalize embeddings
     emb_mean = all_emb[train_idx].mean(axis=0)
     emb_std = all_emb[train_idx].std(axis=0) + 1e-8
-    all_emb_norm = (all_emb - emb_mean) / emb_std
 
-    # MLP decoder: embedding → channel intensities
+    train_emb_norm = (all_emb[train_idx] - emb_mean) / emb_std
+    val_emb_norm = (val_emb_raw - emb_mean) / emb_std
+
+    # MLP decoder
     hidden = args.mlp_hidden or D
     model = nn.Sequential(
         nn.Linear(D, hidden),
@@ -542,31 +688,55 @@ def train_virtual_stain_mlp(embeddings_dir, patches_dir, args):
     ).to(device)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    criterion = nn.MSELoss()
 
-    train_ds = TensorDataset(
-        torch.from_numpy(all_emb_norm[train_idx]).float(),
-        torch.from_numpy(all_targets[train_idx]).float(),
-    )
+    # Build train DataLoader
+    if use_masked:
+        train_ds = TensorDataset(
+            torch.from_numpy(train_emb_norm).float(),
+            torch.from_numpy(all_targets[train_idx]).float(),
+            torch.from_numpy(all_masks[train_idx]).float(),
+        )
+    else:
+        train_ds = TensorDataset(
+            torch.from_numpy(train_emb_norm).float(),
+            torch.from_numpy(all_targets[train_idx]).float(),
+        )
     train_dl = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, drop_last=False)
 
-    val_emb = torch.from_numpy(all_emb_norm[val_idx]).float().to(device)
-    val_tgt = torch.from_numpy(all_targets[val_idx]).float().to(device)
+    val_emb_t = torch.from_numpy(val_emb_norm).float().to(device)
+    val_tgt_t = torch.from_numpy(val_tgt_raw).float().to(device)
+    val_mask_t = torch.from_numpy(val_mask_raw).float().to(device) if val_mask_raw is not None else None
 
+    # ------------------------------------------------------------------
+    # Training loop
+    # ------------------------------------------------------------------
     best_loss, best_state = float("inf"), None
     for epoch in range(args.epochs):
         model.train()
-        for xb, yb in train_dl:
-            xb, yb = xb.to(device), yb.to(device)
-            optimizer.zero_grad()
-            loss = criterion(model(xb), yb)
+        for batch in train_dl:
+            if use_masked:
+                xb, yb, mb = batch
+                xb, yb, mb = xb.to(device), yb.to(device), mb.to(device)
+                optimizer.zero_grad()
+                pred = model(xb)
+                loss = ((pred - yb) ** 2 * mb).sum() / mb.sum().clamp(min=1)
+            else:
+                xb, yb = batch
+                xb, yb = xb.to(device), yb.to(device)
+                optimizer.zero_grad()
+                loss = nn.functional.mse_loss(model(xb), yb)
             loss.backward()
             optimizer.step()
 
         model.eval()
         with torch.no_grad():
-            val_pred = model(val_emb)
-            val_loss = criterion(val_pred, val_tgt).item()
+            val_pred = model(val_emb_t)
+            if val_mask_t is not None:
+                val_loss = ((val_pred - val_tgt_t) ** 2 * val_mask_t).sum() / val_mask_t.sum().clamp(min=1)
+            else:
+                val_loss = nn.functional.mse_loss(val_pred, val_tgt_t)
+            val_loss = val_loss.item()
+
         if val_loss < best_loss:
             best_loss = val_loss
             best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
@@ -576,23 +746,32 @@ def train_virtual_stain_mlp(embeddings_dir, patches_dir, args):
     model.load_state_dict(best_state)
     model.eval()
 
-    # Evaluate: per-channel Pearson on validation set
+    # ------------------------------------------------------------------
+    # Evaluate: per-marker Pearson on validation / test set
+    # ------------------------------------------------------------------
     with torch.no_grad():
-        preds = model(val_emb).cpu().numpy()
-    targets_val = all_targets[val_idx]
+        preds = model(val_emb_t).cpu().numpy()
 
     results = []
     for c in range(C_out):
-        if inv_tokenizer is not None and all_channel_ids_list[0] is not None:
-            ch_id = all_channel_ids_list[0][c] if c < len(all_channel_ids_list[0]) else c
-            marker_name = inv_tokenizer.get(int(ch_id), f"ch{c}")
+        if use_masked:
+            marker_name = inv_tokenizer.get(c, f"ch{c}")
+            if marker_name in skip_set:
+                continue
+            col_mask = val_mask_raw[:, c] if val_mask_raw is not None else np.ones(len(preds), dtype=bool)
+            if col_mask.sum() < 5:
+                continue
+            r, _ = pearsonr(preds[col_mask, c], val_tgt_raw[col_mask, c])
         else:
-            marker_name = f"ch{c}"
+            if inv_tokenizer is not None and all_channel_ids_list[0] is not None:
+                ch_id = all_channel_ids_list[0][c] if c < len(all_channel_ids_list[0]) else c
+                marker_name = inv_tokenizer.get(int(ch_id), f"ch{c}")
+            else:
+                marker_name = f"ch{c}"
+            if marker_name in skip_set:
+                continue
+            r, _ = pearsonr(preds[:, c], val_tgt_raw[:, c])
 
-        if marker_name in skip_set:
-            continue
-
-        r, _ = pearsonr(preds[:, c], targets_val[:, c])
         results.append({"marker": marker_name, "pearson": r})
 
     df = pd.DataFrame(results)
@@ -650,8 +829,15 @@ def main():
 
     # --- Virtual staining ---
     vs = subparsers.add_parser("virtual_stain", help="Virtual staining via MLP decoder")
-    vs.add_argument("--embeddings-dir", required=True, help="Dir with emb_*.npy files")
-    vs.add_argument("--patches-dir", required=True, help="Dir with original patch .npy files")
+    vs.add_argument("--embeddings-dir", required=True,
+                    help="Dir with embeddings_*.npz (panel-config) or emb_*.npy (legacy)")
+    vs.add_argument("--patches-dir", default=None,
+                    help="Dir with original patch .npy files (legacy mode only)")
+    vs.add_argument("--train-embeddings-dir", default=None,
+                    help="Separate dir with training-split embeddings (npz mode). "
+                         "If given, --embeddings-dir is used for test only.")
+    vs.add_argument("--panel-config", default=None,
+                    help="Path to all_panels_config.yaml (required for npz mode)")
     vs.add_argument("--output-dir", required=True)
     vs.add_argument("--tokenizer-config", default="configs/all_markers_tokenizer.yaml")
     vs.add_argument("--skip-markers", nargs="*", default=["DNA1", "DNA2"])

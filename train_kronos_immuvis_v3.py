@@ -1,8 +1,16 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 # train_kronos_immuvis_v3.py
+#
+# ImmuKRONOS DINOv3 training with Hyperkernel stem + RoPE/RMSNorm/SwiGLU.
+# Supports channel_fraction dropout (like standard KRONOS) when set in config.
+#
+# Usage:
+#   python train_kronos_immuvis_v3.py configs/exp6b_immukronos_v3.yaml
 
+import functools
 import os
+import random
 import sys
 
 import comet_ml  # noqa: F401
@@ -499,10 +507,26 @@ class DINODatasetWrapper(torch.utils.data.Dataset):
         crops = self.transform(img)
         return crops, channel_ids, panel_idx, img_path
 
-def dino_collate_fn(batch):
+def dino_collate_fn(batch, channel_fraction=None):
+    """Collate multi-crop batch with optional channel dropout.
+
+    If channel_fraction is set (e.g. (0.75, 1.0)), randomly drops a fraction
+    of channels uniformly across the entire batch. All samples in a
+    PanelBatchSampler batch share the same marker set.
+    """
     num_crops = len(batch[0][0])
     crops = [torch.stack([item[0][i] for item in batch]) for i in range(num_crops)]
     channel_ids = torch.stack([item[1] for item in batch])
+
+    if channel_fraction is not None:
+        C = crops[0].shape[1]
+        frac = random.uniform(*channel_fraction)
+        n_keep = max(1, int(C * frac))
+        if n_keep < C:
+            perm = torch.randperm(C)[:n_keep].sort().values
+            crops = [crop[:, perm] for crop in crops]
+            channel_ids = channel_ids[:, perm]
+
     return crops, channel_ids
 
 def cosine_scheduler(base_value, final_value, epochs, niter_per_ep, warmup_epochs=0):
@@ -548,6 +572,15 @@ def main():
     local_crops_number = config['local_crops_number']
     ncrops = global_crops_number + local_crops_number
 
+    # Channel dropout
+    channel_fraction = config.get("channel_fraction", None)
+    if channel_fraction is not None:
+        channel_fraction = tuple(channel_fraction)
+        print(f"Channel dropout enabled: keep fraction {channel_fraction}")
+        collate_fn = functools.partial(dino_collate_fn, channel_fraction=channel_fraction)
+    else:
+        collate_fn = dino_collate_fn
+
     dino_transform = MultiCropTransform(
         global_size=config['global_crops_size'],
         local_size=config['local_crops_size'],
@@ -566,7 +599,7 @@ def main():
     train_sampler = PanelBatchSampler(train_dataset_base, config['batch_size'])
     train_dataloader = DataLoader(
         train_dataset, batch_sampler=train_sampler,
-        num_workers=config.get('num_workers', 4), collate_fn=dino_collate_fn,
+        num_workers=config.get('num_workers', 4), collate_fn=collate_fn,
         pin_memory=True, persistent_workers=True, prefetch_factor=4,
     )
 

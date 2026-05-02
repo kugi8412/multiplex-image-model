@@ -45,6 +45,7 @@ import argparse
 import numpy as np
 import torch
 import torch.nn.functional as F
+from torch.utils.data import DataLoader
 from tqdm import tqdm
 from ruamel.yaml import YAML
 
@@ -69,6 +70,55 @@ def _load_tokenizer(config):
     return tokenizer
 
 
+def _resolve_panel_config(config, override_path=None):
+    """Load panel config from explicit path or from model config keys."""
+    yaml = YAML(typ="safe")
+    if override_path is not None:
+        path = override_path
+    else:
+        path = config.get(
+            "panel_config",
+            config.get("panel_config_path", None),
+        )
+    if path is None:
+        return None
+    if not os.path.exists(path):
+        print(f"[WARN] Panel config not found at '{path}'")
+        return None
+    with open(path, "r") as f:
+        return yaml.load(f)
+
+
+def _normalize_encoder_config(raw_encoder):
+    """Normalize raw YAML encoder config to the dict format MultiplexAutoencoder expects.
+
+    Adds Pydantic-style defaults and remaps 'hyperkernel' → 'hyperkernel_config'.
+    """
+    enc = dict(raw_encoder)
+    enc.setdefault("ma_layers_blocks", [])
+    enc.setdefault("ma_embedding_dims", [])
+    enc.setdefault("pm_layers_blocks", [])
+    enc.setdefault("pm_embedding_dims", [])
+    enc.setdefault("use_latent_norm", True)
+    enc.setdefault("encoder_type", "convnext")
+    if "hyperkernel" in enc and "hyperkernel_config" not in enc:
+        enc["hyperkernel_config"] = enc.pop("hyperkernel")
+    return enc
+
+
+def _normalize_decoder_config(raw_decoder):
+    """Normalize raw YAML decoder config to the dict format MultiplexAutoencoder expects.
+
+    Adds Pydantic-style defaults and remaps 'hyperkernel' → 'hyperkernel_config'.
+    """
+    dec = dict(raw_decoder)
+    dec.setdefault("num_outputs", 2)
+    dec.setdefault("block_type", "convnext")
+    if "hyperkernel" in dec and "hyperkernel_config" not in dec:
+        dec["hyperkernel_config"] = dec.pop("hyperkernel")
+    return dec
+
+
 def load_immuvis(config, checkpoint_path, device):
     from multiplex_model.modules.immuvis import MultiplexAutoencoder
 
@@ -76,10 +126,13 @@ def load_immuvis(config, checkpoint_path, device):
     num_channels = len(tokenizer)
     input_size = tuple(config.get("input_image_size", [128, 128]))
 
+    encoder_cfg = _normalize_encoder_config(config["encoder"])
+    decoder_cfg = _normalize_decoder_config(config["decoder"])
+
     model = MultiplexAutoencoder(
         num_channels=num_channels,
-        encoder_config=config["encoder"],
-        decoder_config=config["decoder"],
+        encoder_config=encoder_cfg,
+        decoder_config=decoder_cfg,
     ).to(device)
 
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
@@ -107,7 +160,7 @@ def load_kronos_dino(config, checkpoint_path, device):
     from multiplex_model.kronos.vision_transformer import vit_small, vit_base, vit_large
 
     model_name = config.get("model_name", "vits16")
-    patch_size = config.get("patch_size", 16)
+    patch_size = config.get("patch_size", 8)
     num_markers = len(_load_tokenizer(config))
     img_size = config.get("global_crops_size", [128, 128])
     if isinstance(img_size, list):
@@ -147,11 +200,12 @@ def load_kronos_dinov2v3(config, checkpoint_path, device):
     from multiplex_model.kronos.vision_transformer import vit_small, vit_base, vit_large, vit_giant2
 
     model_name = config.get("model_name", "vitb16")
-    patch_size = config.get("patch_size", 16)
+    patch_size = config.get("patch_size", 8)
     num_markers = len(_load_tokenizer(config))
     img_size = config.get("global_crops_size", [128, 128])
     if isinstance(img_size, list):
         img_size = img_size[0]
+
     num_register_tokens = config.get("num_register_tokens", 0)
     ffn_layer = config.get("ffn_layer", "mlp")
     init_values = config.get("init_values", None)
@@ -197,7 +251,7 @@ def load_kronos_immuvis_v2(config, checkpoint_path, device):
     from train_kronos_immuvis_v2 import ImmuvisDINO
 
     num_markers = len(_load_tokenizer(config))
-    patch_size = config.get("patch_size", 16)
+    patch_size = config.get("patch_size", 8)
     out_dim = config.get("out_dim", 65536)
 
     model = ImmuvisDINO(
@@ -242,7 +296,7 @@ def load_kronos_immuvis_v3(config, checkpoint_path, device):
     embed_dim = config.get("embed_dim", 768)
     depth = config.get("depth", 12)
     num_heads = config.get("num_heads", 12)
-    patch_size = config.get("patch_size", 16)
+    patch_size = config.get("patch_size", 8)
     out_dim = config.get("out_dim", 65536)
     num_register_tokens = config.get("num_register_tokens", 4)
     ibot_out_dim = config.get("ibot_out_dim", 8192)
@@ -279,7 +333,7 @@ def load_kronos_immuvis_v3(config, checkpoint_path, device):
 def load_kronos_pretrained(config, checkpoint_path, device):
     from multiplex_model.kronos.inference import create_model_from_pretrained
 
-    model, _, embed_dim = create_model_from_pretrained(
+    model, _, _ = create_model_from_pretrained(
         checkpoint_path=checkpoint_path,
         cache_dir=config.get("cache_dir", "./model_assets") if config else "./model_assets",
     )
@@ -301,10 +355,13 @@ def load_dino_encoder(config, checkpoint_path, device):
     num_channels = len(tokenizer)
     input_size = tuple(config.get("input_image_size", [128, 128]))
 
+    encoder_cfg = _normalize_encoder_config(config["encoder"])
+    decoder_cfg = _normalize_decoder_config(config["decoder"])
+
     model = MultiplexAutoencoder(
         num_channels=num_channels,
-        encoder_config=config["encoder"],
-        decoder_config=config["decoder"],
+        encoder_config=encoder_cfg,
+        decoder_config=decoder_cfg,
     ).to(device)
 
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
@@ -339,14 +396,15 @@ def load_masked_model(config, checkpoint_path, device):
     num_channels = len(tokenizer)
     input_size = tuple(config.get("input_image_size", [128, 128]))
 
-    decoder_cfg = dict(config["decoder"])
+    encoder_cfg = _normalize_encoder_config(config["encoder"])
+    decoder_cfg = _normalize_decoder_config(config["decoder"])
     uncertainty_method = config.get("uncertainty_method", "beta_nll")
-    if "num_outputs" not in decoder_cfg:
-        decoder_cfg["num_outputs"] = 4 if uncertainty_method == "evidential" else 2
+    if uncertainty_method == "evidential":
+        decoder_cfg["num_outputs"] = 4
 
     model = MultiplexAutoencoder(
         num_channels=num_channels,
-        encoder_config=config["encoder"],
+        encoder_config=encoder_cfg,
         decoder_config=decoder_cfg,
     ).to(device)
 
@@ -389,14 +447,22 @@ MODEL_LOADERS = {
 # ---------------------------------------------------------------------------
 
 def process_batch(extract_fn, batch_imgs, batch_ids, device, target_size):
-    x = torch.from_numpy(batch_imgs).float().to(device)
+    """Process a batch of images. Accepts both numpy arrays and torch tensors."""
+    if isinstance(batch_imgs, np.ndarray):
+        x = torch.from_numpy(batch_imgs).float().to(device)
+    else:
+        x = batch_imgs.float().to(device)
+
     if x.shape[-2:] != target_size:
         x = F.interpolate(x, size=target_size, mode="bilinear", align_corners=False)
 
     B, C = x.shape[0], x.shape[1]
 
     if batch_ids is not None:
-        channel_ids = torch.from_numpy(batch_ids).long().to(device)
+        if isinstance(batch_ids, np.ndarray):
+            channel_ids = torch.from_numpy(batch_ids).long().to(device)
+        else:
+            channel_ids = batch_ids.long().to(device)
         if channel_ids.ndim == 1:
             channel_ids = channel_ids.unsqueeze(0).expand(B, -1)
     else:
@@ -427,10 +493,17 @@ def main():
     parser.add_argument("--checkpoint", type=str, required=True,
                         help="Path to model checkpoint (or hf_hub:... for kronos_pretrained).")
     parser.add_argument("--output_dir", type=str, required=True)
-    parser.add_argument("--input_dir", type=str, nargs="+", required=True,
-                        help="Directories containing .npy / .npz input files.")
+    parser.add_argument("--input_dir", type=str, nargs="+", default=None,
+                        help="Directories containing .npy / .npz input files (legacy mode).")
+    parser.add_argument("--panel-config", type=str, default=None,
+                        help="Path to panel config YAML (e.g. configs/all_panels_config.yaml). "
+                             "If not given, auto-detected from --config.")
+    parser.add_argument("--split", type=str, default="test",
+                        help="Data split to use when loading via panel config (default: test).")
     parser.add_argument("--batch_size", type=int, default=256)
     parser.add_argument("--device", type=str, default=None)
+    parser.add_argument("--file-extension", type=str, default=None,
+                        help="File extension for data loading (npy or tiff). Auto-detected from config.")
     args = parser.parse_args()
 
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
@@ -451,6 +524,89 @@ def main():
 
     print(f"Target input size: {target_size}")
 
+    panel_config = _resolve_panel_config(config, args.panel_config)
+
+    if panel_config is not None:
+        # Panel-config mode: use DatasetFromTIFF + PanelBatchSampler
+        _run_panel_config_mode(
+            extract_fn, target_size, config, panel_config,
+            args, device,
+        )
+    elif args.input_dir is not None:
+        # Legacy mode: raw .npy/.npz files from --input_dir
+        _run_legacy_mode(extract_fn, target_size, args, device)
+    else:
+        print("[ERROR] No data source. Provide --panel-config (or set panel_config in "
+              "model config), or provide --input_dir for legacy .npy loading.")
+        sys.exit(1)
+
+
+def _run_panel_config_mode(extract_fn, target_size, config, panel_config, args, device):
+    """Load data via DatasetFromTIFF + PanelBatchSampler and generate embeddings."""
+    from multiplex_model.data import DatasetFromTIFF, PanelBatchSampler
+    from torchvision.transforms import CenterCrop
+
+    tokenizer = _load_tokenizer(config)
+    file_extension = args.file_extension or config.get("file_extension", "npy")
+
+    test_transform = CenterCrop(target_size) 
+
+    dataset = DatasetFromTIFF(
+        panels_config=panel_config,
+        split=args.split,
+        marker_tokenizer=tokenizer,
+        transform=test_transform,
+        use_preprocessing=False,
+        use_butterworth_filter=True,
+        use_clip_normalization=True,
+        file_extension=file_extension,
+    )
+    print(f"Dataset: {len(dataset)} images from {len(dataset.channel_ids)} panels "
+          f"(split={args.split})")
+
+    if len(dataset) == 0:
+        print("[WARN] No images found. Check paths and file_extension.")
+        return
+
+    sampler = PanelBatchSampler(dataset, batch_size=args.batch_size, shuffle=False)
+    dataloader = DataLoader(
+        dataset,
+        batch_sampler=sampler,
+        num_workers=config.get("num_workers", 4),
+        pin_memory=False,
+    )
+
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    all_embeddings = []
+    all_paths = []
+    all_datasets = []
+
+    for imgs, channel_ids, dataset_names, img_paths in tqdm(dataloader, desc="Batches"):
+        emb = process_batch(extract_fn, imgs, channel_ids, device, target_size)
+        all_embeddings.append(emb)
+        all_paths.extend(img_paths)
+        all_datasets.extend(dataset_names)
+
+    if all_embeddings:
+        final_embeddings = np.concatenate(all_embeddings, axis=0)
+        save_path = os.path.join(args.output_dir, f"embeddings_{args.split}.npz")
+        np.savez(
+            save_path,
+            embeddings=final_embeddings,
+            paths=np.array(all_paths, dtype=object),
+            datasets=np.array(all_datasets, dtype=object),
+        )
+        print(f"Done. Saved {final_embeddings.shape[0]} embeddings "
+              f"({final_embeddings.shape[1]}d) to {save_path}")
+    else:
+        print("[WARN] No embeddings generated.")
+
+    gc.collect()
+
+
+def _run_legacy_mode(extract_fn, target_size, args, device):
+    """Legacy mode: load raw .npy/.npz files from --input_dir."""
     files_to_process = []
     for d in args.input_dir:
         files_to_process.extend(glob.glob(os.path.join(d, "*.npy")))
