@@ -13,71 +13,21 @@ from ruamel.yaml import YAML
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
-from multiplex_model.data import DatasetFromTIFF, PanelBatchSampler, TestCrop
+from multiplex_model.data import MultiplexDataset, TestCrop
 from multiplex_model.modules.immuvis import MultiplexAutoencoder
-from ruamel.yaml import YAML
-
-# Supported model types for leave-one-out validation
-MODEL_TYPES = [
-    "autoencoder",           # MultiplexAutoencoder (ViT baseline, finetune DINO, etc.)
-    "immukronos_finetuned",  # ImmukronosAutoencoder (finetuned decoder on frozen KRONOS)
-]
+from multiplex_model.utils.configuration import (
+    DataConfig,
+    DecoderConfig,
+    EncoderConfig,
+    load_panel_config,
+    load_tokenizer_config,
+)
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run leave-one-out validation (mask one channel at a time)."
     )
-
-    # ---- single-model mode (recommended for Exp 5a/5b, 7a/7b/7c) ----
-    parser.add_argument(
-        "--model-type",
-        type=str,
-        default="autoencoder",
-        choices=MODEL_TYPES,
-        help=(
-            "Model type. 'autoencoder' for MultiplexAutoencoder (ViT baseline, "
-            "finetune DINO, Mamba). 'immukronos_finetuned' for finetuned "
-            "ImmukronosAutoencoder (from finetune_immukronos_decoder.py)."
-        ),
-    )
-    parser.add_argument(
-        "--kronos-config",
-        type=str,
-        default=None,
-        help=(
-            "Path to original KRONOS training config YAML. Required when "
-            "--model-type=immukronos_finetuned."
-        ),
-    )
-    parser.add_argument(
-        "--kronos-version",
-        type=str,
-        default="v2",
-        choices=["v2", "v3"],
-        help="ImmunoKronos version (v2 or v3). Used with --model-type=immukronos_finetuned.",
-    )
-    parser.add_argument(
-        "--config",
-        type=str,
-        default=None,
-        help=(
-            "Path to training config YAML (e.g. configs/exp5a_finetune_dinov2.yaml). "
-            "When provided together with --checkpoint, evaluates that single model "
-            "and ignores --versions / --checkpoint-glob / --models-path."
-        ),
-    )
-    parser.add_argument(
-        "--checkpoint",
-        type=str,
-        default=None,
-        help=(
-            "Path to a single model checkpoint (.pth). "
-            "Must be used together with --config."
-        ),
-    )
-
-    # ---- batch-discovery mode (legacy) ----
     parser.add_argument(
         "--versions",
         type=int,
@@ -123,11 +73,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--panel-config",
-        default="configs/all_panels_config.yaml",
+        default="/home/duchal/ImmuVis_2/multiplex-image-model/configs/all_panels_config.yaml",
     )
     parser.add_argument(
         "--tokenizer-config",
-        default="configs/all_markers_tokenizer.yaml",
+        default="/home/duchal/ImmuVis_2/multiplex-image-model/configs/all_markers_tokenizer.yaml",
     )
     parser.add_argument(
         "--data-config",
@@ -207,22 +157,7 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Use strict=True when loading checkpoint state_dict.",
     )
-    parser.add_argument(
-        "--model-label",
-        type=str,
-        default=None,
-        help=(
-            "Human-readable label for this model in the output CSV 'model' column. "
-            "Defaults to checkpoint filename stem."
-        ),
-    )
-    args = parser.parse_args()
-
-    # Validate single-model mode args
-    if (args.config is None) != (args.checkpoint is None):
-        parser.error("--config and --checkpoint must be specified together.")
-
-    return args
+    return parser.parse_args()
 
 
 def apply_mu_activation(mu: torch.Tensor, activation: str) -> torch.Tensor:
@@ -251,31 +186,24 @@ def _resolve_dataset_setup(
     data_config_path: str | None,
     data_overrides: dict[str, Any],
 ) -> tuple[dict[str, Any], dict[str, int], dict[str, Any]]:
-    
-    yaml = YAML(typ="safe")
-    
-    # Load Panel Config
-    with open(panel_config_path, "r") as f:
-        panel_config_dict = yaml.load(f)
-        
-    # Load Tokenizer Config
-    with open(tokenizer_config_path, "r") as f:
-        tokenizer = yaml.load(f)
-
-    # Simplified data config handling
+    panel_config_dict = load_panel_config(panel_config_path)
+    tokenizer = load_tokenizer_config(tokenizer_config_path)
     data_config = {}
-    if data_config_path:
-        with open(data_config_path, "r") as f:
-             data_config.update(yaml.load(f))
 
-    # Apply overrides
+    if data_config_path:
+        external_data_cfg = _load_yaml(data_config_path)
+        validated_external_data_cfg = DataConfig(**external_data_cfg).model_dump()
+        data_config.update(validated_external_data_cfg)
+
+    # Final precedence: explicit CLI overrides.
     cli_data_overrides = {
         key: value for key, value in data_overrides.items() if value is not None
     }
-    data_config.update(cli_data_overrides)
+    if cli_data_overrides:
+        data_config.update(cli_data_overrides)
 
-    # Ensure required defaults (matching your ImmuVis pipeline)
-    data_config.setdefault("file_extension", "npy")
+    # Validate merged data config for early and clear failures.
+    data_config = DataConfig(**data_config).model_dump()
 
     return panel_config_dict, tokenizer, data_config
 
@@ -337,163 +265,6 @@ def create_leave_one_out_batch(
     return masked_img, active_channel_ids, output_channel_ids, masked_indices
 
 
-def _build_model(
-    model_config_dict: dict[str, Any],
-    num_channels: int,
-    strict: bool,
-    checkpoint_path: str,
-    device: str,
-) -> MultiplexAutoencoder:
-    """Instantiate MultiplexAutoencoder from a training config and checkpoint."""
-    
-    # Normalize raw YAML dicts to the format MultiplexAutoencoder expects.
-    # Pydantic TrainingConfig uses aliases (hyperkernel → hyperkernel_config)
-    # and provides defaults for empty lists; replicate that here.
-    encoder_config = dict(model_config_dict["encoder"])
-    encoder_config.setdefault("ma_layers_blocks", [])
-    encoder_config.setdefault("ma_embedding_dims", [])
-    encoder_config.setdefault("pm_layers_blocks", [])
-    encoder_config.setdefault("pm_embedding_dims", [])
-    encoder_config.setdefault("use_latent_norm", True)
-    encoder_config.setdefault("encoder_type", "convnext")
-    if "hyperkernel" in encoder_config and "hyperkernel_config" not in encoder_config:
-        encoder_config["hyperkernel_config"] = encoder_config.pop("hyperkernel")
-
-    decoder_config_dict = dict(model_config_dict["decoder"])
-    decoder_config_dict.setdefault("block_type", "convnext")
-    if "hyperkernel" in decoder_config_dict and "hyperkernel_config" not in decoder_config_dict:
-        decoder_config_dict["hyperkernel_config"] = decoder_config_dict.pop("hyperkernel")
-
-    # For masked-model checkpoints (beta_nll / evidential), ensure num_outputs
-    # is present so the decoder allocates the right output head.
-    uncertainty_method = model_config_dict.get("uncertainty_method", "beta_nll")
-    if "num_outputs" not in decoder_config_dict:
-        decoder_config_dict["num_outputs"] = (
-            4 if uncertainty_method == "evidential" else 2
-        )
-
-    model = MultiplexAutoencoder(
-        num_channels=num_channels,
-        encoder_config=encoder_config,
-        decoder_config=decoder_config_dict,
-    )
-
-    ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
-    if isinstance(ckpt, dict):
-        state_dict = ckpt.get("model_state_dict", ckpt.get("model", ckpt))
-    else:
-        state_dict = ckpt
-        
-    model.load_state_dict(state_dict, strict=strict)
-    model = model.to(device)
-    model.eval()
-    return model
-
-
-def _build_immukronos_model(
-    kronos_config_path: str,
-    decoder_config_dict: dict[str, Any],
-    num_channels: int,
-    strict: bool,
-    checkpoint_path: str,
-    device: str,
-    version: str = "v2",
-):
-    """Instantiate ImmukronosAutoencoder from a finetuning checkpoint.
-
-    The checkpoint contains the combined encoder+decoder state_dict produced
-    by finetune_immukronos_decoder.py.
-    """
-    from finetune_immunokronos_decoder import (
-        ImmukronosAutoencoder,
-        build_decoder,
-        load_kronos_checkpoint,
-    )
-
-    yaml = YAML(typ="safe")
-    with open(kronos_config_path) as f:
-        kronos_config = yaml.load(f)
-
-    kronos_model, num_markers, tokenizer = load_kronos_checkpoint(
-        kronos_config, checkpoint_path, device, version=version,
-    )
-    embed_dim = kronos_config.get("embed_dim", 768)
-    patch_size = kronos_config.get("patch_size", 8)
-
-    # Build decoder from the config
-    dec_cfg = dict(decoder_config_dict.get("decoder", decoder_config_dict))
-    dec_cfg.setdefault("block_type", "convnext")
-    dec_cfg.setdefault("num_outputs", 2)
-    if "hyperkernel" in dec_cfg and "hyperkernel_config" not in dec_cfg:
-        dec_cfg["hyperkernel_config"] = dec_cfg.pop("hyperkernel")
-
-    decoder = build_decoder(dec_cfg, num_channels=num_channels, embed_dim=embed_dim)
-
-    model = ImmukronosAutoencoder(
-        kronos_model=kronos_model,
-        decoder=decoder,
-        num_channels=num_channels,
-        patch_size=patch_size,
-        embed_dim=embed_dim,
-        version=version,
-        freeze_encoder=True,
-    )
-
-    ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
-    if isinstance(ckpt, dict):
-        state_dict = ckpt.get("model_state_dict", ckpt.get("model", ckpt))
-    else:
-        state_dict = ckpt
-    model.load_state_dict(state_dict, strict=strict)
-    model = model.to(device)
-    model.eval()
-    return model
-
-
-def _discover_models(
-    args: argparse.Namespace,
-) -> list[tuple[str, str, str]]:
-    """Return list of (checkpoint_path, config_path, model_label) tuples.
-
-    Single-model mode (--config + --checkpoint) returns exactly one entry.
-    Batch-discovery mode (--versions / --checkpoint-glob) scans --models-path.
-    """
-    # --- single-model mode ---
-    if args.config is not None:
-        label = args.model_label or Path(args.checkpoint).stem
-        return [(args.checkpoint, args.config, label)]
-
-    # --- batch-discovery mode ---
-    patterns = args.checkpoint_glob or [
-        f"Immu*-6{v:02d}-*.pth" for v in args.versions
-    ]
-    model_files: list[str] = []
-    for pattern in patterns:
-        model_files.extend(glob(f"{args.models_path}/{pattern}"))
-
-    if not model_files:
-        raise FileNotFoundError(
-            f"No model checkpoints found in {args.models_path} "
-            f"for patterns {patterns}."
-        )
-
-    entries: list[tuple[str, str, str]] = []
-    for model_path in sorted(model_files):
-        checkpoint_name = os.path.basename(model_path)
-        model_idx = checkpoint_name.split("-")[1]
-        config_name = f"config.{checkpoint_name.split('.')[0]}.yaml"
-        config_path = f"{args.models_path}/{config_name}"
-        if not os.path.exists(config_path):
-            print(
-                f"Skipping {checkpoint_name}: config not found at {config_path}"
-            )
-            continue
-        label = args.model_label or f"ImmuVis-{model_idx}"
-        entries.append((model_path, config_path, label))
-
-    return entries
-
-
 def main() -> None:
     args = parse_args()
 
@@ -510,34 +281,32 @@ def main() -> None:
         "operation_order": args.operation_order,
     }
 
-    model_entries = _discover_models(args)
+    patterns = args.checkpoint_glob or [f"Immu*-6{v:02d}-*.pth" for v in args.versions]
+    model_files: list[str] = []
+    for pattern in patterns:
+        model_files.extend(glob(f"{args.models_path}/{pattern}"))
+
+    if not model_files:
+        raise FileNotFoundError(
+            f"No model checkpoints found in {args.models_path} for versions {args.versions}."
+        )
+
     os.makedirs(args.results_dir, exist_ok=True)
 
-    for checkpoint_path, config_path, model_label in model_entries:
-        print(f"\n{'=' * 60}")
-        print(f"Model: {model_label}")
-        print(f"Config: {config_path}")
-        print(f"Checkpoint: {checkpoint_path}")
-        print(f"{'=' * 60}")
+    for model_name in sorted(model_files):
+        model_checkpoint = os.path.basename(model_name)
+        model_idx = model_checkpoint.split("-")[1]
+        config_name = f"config.{model_checkpoint.split('.')[0]}.yaml"
+        model_config_path = f"{args.models_path}/{config_name}"
+        if not os.path.exists(model_config_path):
+            print(f"Skipping {model_checkpoint}: model config not found at {model_config_path}")
+            continue
 
-        model_config_dict = _load_yaml(config_path)
-
-        # Resolve panel/tokenizer from the training config if not overridden.
-        effective_panel = args.panel_config
-        effective_tokenizer = args.tokenizer_config
-        if "panel_config" in model_config_dict and not os.path.isabs(args.panel_config):
-            candidate = model_config_dict["panel_config"]
-            if os.path.exists(candidate):
-                effective_panel = candidate
-        if "tokenizer_config" in model_config_dict and not os.path.isabs(args.tokenizer_config):
-            candidate = model_config_dict["tokenizer_config"]
-            if os.path.exists(candidate):
-                effective_tokenizer = candidate
-
+        model_config_dict = _load_yaml(model_config_path)
         panel_config_dict, tokenizer, data_config = _resolve_dataset_setup(
             raw_model_config=model_config_dict,
-            panel_config_path=effective_panel,
-            tokenizer_config_path=effective_tokenizer,
+            panel_config_path=args.panel_config,
+            tokenizer_config_path=args.tokenizer_config,
             data_config_path=args.data_config,
             data_overrides=data_overrides,
         )
@@ -549,52 +318,42 @@ def main() -> None:
         inv_tokenizer = {v: k for k, v in tokenizer.items()}
         num_channels = len(tokenizer)
 
+        print(f"Number of channels: {num_channels}")
+        print(f"Sample markers: {list(tokenizer.keys())[:5]}")
+        print(
+            "Data preprocessing config: "
+            f"pre={data_config['preprocessing_func']}, denoise={data_config['denoising_func']}, "
+            f"scale={data_config['scaling_func']}, norm={data_config['normalization_func']}, "
+            f"ext={data_config['file_extension']}"
+        )
+
         test_transform = TestCrop(args.crop_size)
-        
-        test_dataset = DatasetFromTIFF(
+        test_dataset = MultiplexDataset(
             panels_config=panel_config_dict,
             split=args.split,
             marker_tokenizer=tokenizer,
             transform=test_transform,
-            use_preprocessing=False,
-            use_butterworth_filter=True,
-            use_clip_normalization=True,
-            file_extension="npy"
-        )
-
-        print(f"Test dataset size: {len(test_dataset)} images")
-
-        test_batch_sampler = PanelBatchSampler(test_dataset, batch_size=1, shuffle=False)
-        dataloader = DataLoader(
-            test_dataset, 
-            batch_sampler=test_batch_sampler,
-            num_workers=4, 
-            pin_memory=False
+            **data_config,
         )
         print(f"Test dataset size: {len(test_dataset)} images")
-        # dataloader = DataLoader(test_dataset, batch_size=1, shuffle=False)
+        dataloader = DataLoader(test_dataset, batch_size=1, shuffle=False)
 
-        print(f"Loading model weights from: {checkpoint_path}")
-        if args.model_type == "immukronos_finetuned":
-            if args.kronos_config is None:
-                raise ValueError("--kronos-config is required for --model-type=immukronos_finetuned")
-            model = _build_immukronos_model(
-                kronos_config_path=args.kronos_config,
-                decoder_config_dict=model_config_dict,
-                num_channels=num_channels,
-                strict=args.strict_loading,
-                checkpoint_path=checkpoint_path,
-                device=device,
-                version=args.kronos_version,
-            )
-        else:
-            model = _build_model(
-                model_config_dict=model_config_dict,
-                num_channels=num_channels,
-                strict=args.strict_loading,
-                checkpoint_path=checkpoint_path,
-                device=device,
-            )
+        encoder_config = EncoderConfig(**model_config_dict["encoder"])
+        decoder_config = DecoderConfig(**model_config_dict["decoder"])
+        fallback_model_config = {
+            "num_channels": num_channels,
+            "encoder_config": encoder_config.model_dump(),
+            "decoder_config": decoder_config.model_dump(),
+        }
+
+        print(f"Loading model weights from: {model_name}")
+        model = MultiplexAutoencoder.load_from_checkpoint(
+            checkpoint=model_name,
+            map_location="cpu",
+            model_config=fallback_model_config,
+            strict=args.strict_loading,
+        ).to(device)
+        model.eval()
 
         all_mse = []
         all_uncertainties = []
@@ -603,8 +362,7 @@ def main() -> None:
         all_dataset_names = []
         all_image_paths = []
 
-        safe_label = model_label.replace("/", "_").replace("\\", "_")
-        recon_dir = Path(args.recon_dir) / f"{safe_label}_loo"
+        recon_dir = Path(args.recon_dir) / f"immuvis_{model_idx}_loo"
         if args.save_reconstructions:
             recon_dir.mkdir(parents=True, exist_ok=True)
 
@@ -663,7 +421,6 @@ def main() -> None:
                         "masked_strategy": "leave_one_out",
                         "num_channels": int(masked_channel_ids.shape[0]),
                         "mu_activation": args.mu_activation,
-                        "model": model_label,
                     }
                     out_path = recon_dir / f"recn-{img_idx:05d}.npz"
                     np.savez_compressed(
@@ -694,12 +451,12 @@ def main() -> None:
         df["marker"] = df["Channel_ID"].map(lambda x: inv_tokenizer.get(int(x), "Unknown"))
         df["masked"] = "leave_one_out"
         df["masked_count"] = 1
-        df["model"] = model_label
+        df["model"] = f"ImmuVis-{model_idx}"
         df["dataset_name"] = all_dataset_names
         df["image_path"] = all_image_paths
         df["mu_activation"] = args.mu_activation
 
-        output_file = os.path.join(args.results_dir, f"{safe_label}_loo.csv")
+        output_file = os.path.join(args.results_dir, f"immuvis_{model_idx}_loo.csv")
         print(f"Saving results to: {output_file}")
         df.to_csv(output_file, index=False)
 

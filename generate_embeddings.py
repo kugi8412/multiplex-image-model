@@ -101,6 +101,7 @@ def _normalize_encoder_config(raw_encoder):
     enc.setdefault("pm_embedding_dims", [])
     enc.setdefault("use_latent_norm", True)
     enc.setdefault("encoder_type", "convnext")
+    # Pydantic alias: 'hyperkernel' → 'hyperkernel_config'
     if "hyperkernel" in enc and "hyperkernel_config" not in enc:
         enc["hyperkernel_config"] = enc.pop("hyperkernel")
     return enc
@@ -114,6 +115,7 @@ def _normalize_decoder_config(raw_decoder):
     dec = dict(raw_decoder)
     dec.setdefault("num_outputs", 2)
     dec.setdefault("block_type", "convnext")
+    # Pydantic alias: 'hyperkernel' → 'hyperkernel_config'
     if "hyperkernel" in dec and "hyperkernel_config" not in dec:
         dec["hyperkernel_config"] = dec.pop("hyperkernel")
     return dec
@@ -428,6 +430,78 @@ def load_masked_model(config, checkpoint_path, device):
     return extract_fn, input_size
 
 
+def load_immukronos_finetuned(config, checkpoint_path, device, kronos_config_path=None, kronos_version="v2"):
+    """Load a finetuned ImmukronosAutoencoder (frozen encoder + trained decoder).
+
+    The config should be the decoder/finetuning config YAML. The kronos_config_path
+    points to the original KRONOS training config.
+    """
+    sys.path.insert(0, os.getcwd())
+    from finetune_immukronos_decoder import (
+        ImmukronosAutoencoder,
+        build_decoder,
+        load_kronos_checkpoint,
+    )
+
+    if kronos_config_path is None:
+        kronos_config_path = config.get("kronos_config", None)
+    if kronos_config_path is None:
+        raise ValueError(
+            "--kronos-config is required for immukronos_finetuned model type."
+        )
+
+    yaml_loader = YAML(typ="safe")
+    with open(kronos_config_path) as f:
+        kronos_config = yaml_loader.load(f)
+
+    kronos_model, num_markers, tokenizer = load_kronos_checkpoint(
+        kronos_config, checkpoint_path, device, version=kronos_version,
+    )
+    embed_dim = kronos_config.get("embed_dim", 768)
+    patch_size = kronos_config.get("patch_size", 8)
+
+    dec_cfg = dict(config.get("decoder", config))
+    dec_cfg.setdefault("num_outputs", 2)
+    if "hyperkernel" in dec_cfg and "hyperkernel_config" not in dec_cfg:
+        dec_cfg["hyperkernel_config"] = dec_cfg.pop("hyperkernel")
+
+    decoder = build_decoder(dec_cfg, num_channels=num_markers, embed_dim=embed_dim)
+
+    model = ImmukronosAutoencoder(
+        kronos_model=kronos_model,
+        decoder=decoder,
+        num_channels=num_markers,
+        patch_size=patch_size,
+        embed_dim=embed_dim,
+        version=kronos_version,
+        freeze_encoder=True,
+    )
+
+    ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    if isinstance(ckpt, dict):
+        state_dict = ckpt.get("model_state_dict", ckpt.get("model", ckpt))
+    else:
+        state_dict = ckpt
+    model.load_state_dict(state_dict, strict=False)
+    model = model.to(device).eval()
+
+    img_size = kronos_config.get("global_crops_size", 128)
+    if isinstance(img_size, list):
+        img_size = img_size[0]
+    input_size = (img_size, img_size)
+
+    def extract_fn(x, channel_ids):
+        enc_out = model.encode(x, channel_ids)
+        latent = enc_out["output"]
+        if latent.ndim == 4:
+            return latent.mean(dim=(2, 3))
+        elif latent.ndim == 3:
+            return latent.mean(dim=1)
+        return latent
+
+    return extract_fn, input_size
+
+
 MODEL_LOADERS = {
     "immuvis": load_immuvis,
     "kronos_dino": load_kronos_dino,
@@ -439,6 +513,7 @@ MODEL_LOADERS = {
     "mamba": load_masked_model,
     "dino_finetune": load_masked_model,
     "virtual_staining": load_masked_model,
+    "immukronos_finetuned": load_immukronos_finetuned,
 }
 
 
@@ -504,6 +579,10 @@ def main():
     parser.add_argument("--device", type=str, default=None)
     parser.add_argument("--file-extension", type=str, default=None,
                         help="File extension for data loading (npy or tiff). Auto-detected from config.")
+    parser.add_argument("--kronos-config", type=str, default=None,
+                        help="Path to original KRONOS training config YAML. Required for immukronos_finetuned.")
+    parser.add_argument("--kronos-version", type=str, default="v2", choices=["v2", "v3"],
+                        help="ImmunoKronos version (v2 or v3). Used with immukronos_finetuned.")
     args = parser.parse_args()
 
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
@@ -517,7 +596,14 @@ def main():
 
     loader_fn = MODEL_LOADERS[args.model_type]
     try:
-        extract_fn, target_size = loader_fn(config, args.checkpoint, device)
+        if args.model_type == "immukronos_finetuned":
+            extract_fn, target_size = loader_fn(
+                config, args.checkpoint, device,
+                kronos_config_path=args.kronos_config,
+                kronos_version=args.kronos_version,
+            )
+        else:
+            extract_fn, target_size = loader_fn(config, args.checkpoint, device)
     except Exception as e:
         print(f"[ERROR] Failed to load model: {e}")
         sys.exit(1)

@@ -464,21 +464,32 @@ MODEL_CONFIGS = {
 
 
 def build_backbone(model_name, num_markers, img_size, patch_size, drop_path_rate,
-                   num_register_tokens=0, ffn_layer="mlp", init_values=None):
-    """Build KRONOS ViT backbone with given configuration."""
+                   num_register_tokens=0, ffn_layer="mlp", init_values=None,
+                   stride_size=None, block_chunks=1):
+    """Build KRONOS ViT backbone with given configuration.
+
+    Args:
+        stride_size: Patch stride. Defaults to patch_size (non-overlapping).
+            Set to patch_size//2 for token overlap (as in original KRONOS).
+        block_chunks: Split transformer blocks for FSDP wrap. Original KRONOS uses 4.
+    """
     if model_name not in MODEL_CONFIGS:
         raise ValueError(f"Unknown model: {model_name}. Choose from {list(MODEL_CONFIGS.keys())}")
+
+    if stride_size is None:
+        stride_size = patch_size
 
     cfg = MODEL_CONFIGS[model_name]
     backbone = cfg["factory"](
         patch_size=patch_size,
-        stride_size=patch_size,  # non-overlapping patches (standard ViT)
+        stride_size=stride_size,
         num_markers=num_markers,
         img_size=img_size,
         drop_path_rate=drop_path_rate,
         num_register_tokens=num_register_tokens,
         ffn_layer=ffn_layer,
         init_values=init_values,
+        block_chunks=block_chunks,
     )
     return backbone, cfg["embed_dim"]
 
@@ -492,6 +503,8 @@ def main():
     parser.add_argument("config", help="Path to config YAML")
     parser.add_argument("--from-checkpoint", default=None, help="Resume from checkpoint path")
     parser.add_argument("--device", default=None)
+    parser.add_argument("--marker-metadata-csv", default=None,
+                        help="Override marker_metadata_csv path from config")
     args = parser.parse_args()
 
     yaml = YAML(typ="safe")
@@ -524,6 +537,9 @@ def main():
     print(f"Training mode: {training_mode.upper()} | Device: {device}")
 
     # ---- Marker embedding resolution ----
+    # CLI --marker-metadata-csv overrides config key
+    if args.marker_metadata_csv:
+        config["marker_metadata_csv"] = args.marker_metadata_csv
     PANEL_CONFIG = YAML().load(open(config["panel_config"]))
     TOKENIZER_RAW = YAML().load(open(config["tokenizer_config"]))
 
@@ -579,12 +595,14 @@ def main():
     # ---- Model ----
     model_name = config["model_name"]
     patch_size = config.get("patch_size", 16)
+    stride_size = config.get("stride_size", None)  # None => defaults to patch_size (non-overlapping)
     img_size = config.get("global_crops_size", [128, 128])
     if isinstance(img_size, list):
         img_size = img_size[0]
     num_register_tokens = config.get("num_register_tokens", 0)
     ffn_layer = config.get("ffn_layer", "mlp")
     init_values = config.get("init_values", None)
+    block_chunks = config.get("block_chunks", 1)
 
     ibot_out_dim = config.get("ibot_out_dim", None) if training_mode == "dinov3" else None
 
@@ -594,6 +612,8 @@ def main():
         num_register_tokens=num_register_tokens,
         ffn_layer=ffn_layer,
         init_values=init_values,
+        stride_size=stride_size,
+        block_chunks=block_chunks,
     )
     backbone_teacher, _ = build_backbone(
         model_name, num_markers, img_size, patch_size,
@@ -601,6 +621,8 @@ def main():
         num_register_tokens=num_register_tokens,
         ffn_layer=ffn_layer,
         init_values=init_values,
+        stride_size=stride_size,
+        block_chunks=block_chunks,
     )
 
     student = KronosDINOv2v3(backbone_student, embed_dim, config["out_dim"], ibot_out_dim).to(device)
@@ -693,9 +715,14 @@ def main():
     koleo_weight = config.get("koleo_loss_weight", 0.1)
     ibot_mask_ratio = config.get("ibot_mask_ratio", 0.3)
 
+    effective_stride = stride_size if stride_size is not None else patch_size
     print(f"KRONOS {training_mode.upper()} | {model_name} | embed={embed_dim} | "
-          f"patch={patch_size} | markers={num_markers} | "
-          f"registers={num_register_tokens} | ffn={ffn_layer}")
+          f"patch={patch_size} | stride={effective_stride} | markers={num_markers} | "
+          f"registers={num_register_tokens} | ffn={ffn_layer} | "
+          f"init_values={init_values} | block_chunks={block_chunks}")
+    token_overlap = effective_stride < patch_size
+    if token_overlap:
+        print(f"  Token overlap ENABLED (stride={effective_stride} < patch_size={patch_size})")
     print(f"Crops: {n_global} global + {n_local} local | "
           f"Batch: {config['batch_size']} x {grad_accum_steps} accum")
     print(f"Training: epochs {start_epoch}..{config['epochs']-1} | "
