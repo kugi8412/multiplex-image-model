@@ -1,0 +1,47 @@
+# HP search: lr1e4 | KRONOS DINOv3
+# Backbone: ViT-B | Preprocessing: VirTues | 10 epochs
+# Train with: python train_kronos_dinov2v3_virtues.py configs/ablations/kronos_hpsearch/kronos_dinov3_lr1e4_virtues.yaml
+training_mode: "dinov3"
+model_name: "vitb16"
+out_dim: 65536
+drop_path_rate: 0.1
+patch_size: 8
+num_register_tokens: 4
+ffn_layer: "swiglu"
+ibot_out_dim: 8192
+tokenizer_config: "configs/all_markers_tokenizer.yaml"
+marker_metadata_csv: "configs/marker_metadata.csv"
+panel_config: "configs/all_panels_config.yaml"
+file_extension: "npy"
+num_workers: 8
+channel_fraction: [0.75, 1.0]
+global_crops_number: 2
+global_crops_scale: [0.4, 1.0]
+global_crops_size: [128, 128]
+local_crops_number: 8
+local_crops_scale: [0.1, 0.4]
+local_crops_size: [64, 64]
+device: "cuda"
+epochs: 10
+batch_size: 4
+gradient_accumulation_steps: 128
+lr: 1.0e-04
+final_lr: 1.0e-06
+warmup_epochs: 2
+weight_decay: 0.04
+weight_decay_final: 0.4
+clip_grad: 1.0
+warmup_teacher_temp_epochs: 5
+warmup_teacher_temp: 0.04
+teacher_temp: 0.07
+teacher_momentum: 0.996
+ibot_mask_ratio: 0.3
+ibot_loss_weight: 1.0
+koleo_loss_weight: 0.1
+preprocessing_mode: "virtues_arcsinh"
+from_checkpoint: null
+checkpoints_dir: "checkpoints/ablations/kronos_dinov3_lr1e4_virtues"
+save_checkpoint_freq: 5
+tags: ["kronos", "dinov3", "ablation", "hpsearch", "lr1e4", "virtues"]
+comet_project: "immu-vis"
+comet_workspace: "kugi8412"

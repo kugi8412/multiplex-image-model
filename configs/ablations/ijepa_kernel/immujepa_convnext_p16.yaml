@@ -1,0 +1,60 @@
+# Ablation: hyperkernel patch_size=16
+# Backbone: convnext | Preprocessing: immuvis | 10 epochs
+# Train with: python train_ijepa.py configs/ablations/ijepa_kernel/immujepa_convnext_p16.yaml
+backbone: "convnext"
+dino_version: "v2"
+preprocessing: "immuvis"
+use_hyperkernel: true
+
+backbone_config:
+  layers_blocks: [3, 3, 9]
+  embedding_dims: [192, 384, 768]
+  block_parameters: {}
+
+panel_config_path: "configs/all_panels_config.yaml"
+tokenizer_config_path: "configs/all_markers_tokenizer.yaml"
+
+crop_size: 128
+crop_scale: [0.48, 1.0]
+
+num_workers: 8
+
+patch_size: 16
+out_dim: 65536
+embed_dim: 768
+depth: 12
+num_heads: 12
+drop_path_rate: 0.1
+
+predictor_dim: 384
+predictor_depth: 6
+predictor_num_heads: 6
+
+num_target_blocks: 4
+target_scale: [0.15, 0.2]
+target_aspect_ratio: [0.75, 1.5]
+
+device: "cuda"
+epochs: 10
+warmup_epochs: 2
+
+batch_size: 16
+gradient_accumulation_steps: 64
+
+lr: 1.0e-3
+final_lr: 1.0e-6
+weight_decay: 0.04
+weight_decay_final: 0.4
+clip_grad: 1.0
+
+teacher_momentum: 0.996
+
+channel_fraction: [0.75, 1.0]
+mask_strategy: zero
+
+checkpoints_dir: "checkpoints/ablations/immujepa_convnext_p16"
+save_checkpoint_freq: 5
+
+tags: ["immujepa", "convnext, hierarchical", "ablation", "kernel-p16", "immuvis"]
+comet_project: "immu-vis"
+comet_workspace: "kugi8412"
