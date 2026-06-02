@@ -8,7 +8,7 @@
 import os
 from typing import Any, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from .train_logging import get_run_name
 
@@ -62,16 +62,16 @@ class EncoderConfig(BaseModel):
     """Configuration for MultiplexImageEncoder."""
 
     ma_layers_blocks: list[int] = Field(
-        default_factory=list, description="Number of blocks in each marker-agnostic layer"
+        ..., description="Number of blocks in each marker-agnostic layer"
     )
     ma_embedding_dims: list[int] = Field(
-        default_factory=list, description="Embedding dimensions for marker-agnostic layers"
+        ..., description="Embedding dimensions for marker-agnostic layers"
     )
     pm_layers_blocks: list[int] = Field(
-        default_factory=list, description="Number of blocks in each pan-marker layer"
+        ..., description="Number of blocks in each pan-marker layer"
     )
     pm_embedding_dims: list[int] = Field(
-        default_factory=list, description="Embedding dimensions for pan-marker layers"
+        ..., description="Embedding dimensions for pan-marker layers"
     )
     hyperkernel_config: HyperkernelConfig = Field(
         ..., description="Hyperkernel configuration", alias="hyperkernel"
@@ -113,9 +113,22 @@ class EncoderConfig(BaseModel):
                 )
         return v
 
+    @field_validator("pm_layers_blocks")
+    @classmethod
+    def validate_pm_not_empty(cls, v: list[int]) -> list[int]:
+        if len(v) == 0:
+            raise ValueError(
+                "pm_layers_blocks cannot be empty - at least one pan-marker layer is required"
+            )
+        return v
+
     @field_validator("pm_embedding_dims")
     @classmethod
     def validate_pm_lengths(cls, v: list[int], info) -> list[int]:
+        if len(v) == 0:
+            raise ValueError(
+                "pm_embedding_dims cannot be empty - at least one pan-marker layer is required"
+            )
         if "pm_layers_blocks" in info.data:
             blocks = info.data["pm_layers_blocks"]
             if len(v) != len(blocks):
@@ -123,29 +136,6 @@ class EncoderConfig(BaseModel):
                     f"pm_embedding_dims length ({len(v)}) must match pm_layers_blocks length ({len(blocks)})"
                 )
         return v
-
-    @model_validator(mode="after")
-    def validate_pm_config(self):
-        """Validate pm_layers_blocks: must be non-empty unless encoder is a pretrained backbone (e.g. dino)."""
-        _PRETRAINED_ENCODER_TYPES = {"dino"}
-        enc = self.encoder_type
-        if isinstance(enc, ModuleConfig):
-            enc_type = enc.type
-        elif isinstance(enc, dict):
-            enc_type = enc.get("type", "")
-        elif isinstance(enc, str):
-            enc_type = enc
-        else:
-            enc_type = ""
-
-        is_pretrained = enc_type in _PRETRAINED_ENCODER_TYPES
-
-        if not is_pretrained and len(self.pm_layers_blocks) == 0:
-            raise ValueError(
-                "pm_layers_blocks cannot be empty for non-pretrained encoders "
-                f"(encoder_type='{enc_type}')"
-            )
-        return self
 
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
@@ -332,8 +322,6 @@ class TrainingConfig(BaseModel):
         """Resolve checkpoint path and determine if checkpoint should be loaded.
 
         If from_checkpoint is 'last', attempts to find the last checkpoint file.
-        First tries with the configured run_name, then falls back to finding the
-        most recent last_checkpoint-*.pth file in the checkpoints directory.
         Updates from_checkpoint to the actual path or None if not found.
 
         Returns:
@@ -343,31 +331,21 @@ class TrainingConfig(BaseModel):
             return False
 
         if self.from_checkpoint == "last":
-            if self.run_name:
-                last_possible_checkpoint = (
-                    f"{self.checkpoints_dir}/last_checkpoint-{self.run_name}.pth"
-                )
-                if os.path.exists(last_possible_checkpoint):
-                    self.from_checkpoint = last_possible_checkpoint
-                    return True
+            if not self.run_name:
+                self.run_name = get_run_name()
 
-            # Fallback: find most recent last_checkpoint-*.pth
-            import glob
-            pattern = f"{self.checkpoints_dir}/last_checkpoint-*.pth"
-            candidates = glob.glob(pattern)
-            if candidates:
-                # Pick the most recently modified
-                latest = max(candidates, key=os.path.getmtime)
-                self.from_checkpoint = latest
-                self.run_name = os.path.basename(latest).replace("last_checkpoint-", "").replace(".pth", "")
-                print(f"Found latest checkpoint: {latest}")
-                return True
-
-            print(
-                f"No last checkpoint found in {self.checkpoints_dir}, starting from scratch."
+            last_possible_checkpoint = (
+                f"{self.checkpoints_dir}/last_checkpoint-{self.run_name}.pth"
             )
-            self.from_checkpoint = None
-            return False
+            if os.path.exists(last_possible_checkpoint):
+                self.from_checkpoint = last_possible_checkpoint
+                return True
+            else:
+                print(
+                    f"No last checkpoint found at {last_possible_checkpoint}, starting from scratch."
+                )
+                self.from_checkpoint = None
+                return False
 
         return True
 
