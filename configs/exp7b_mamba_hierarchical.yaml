@@ -65,7 +65,7 @@ beta: 1.0
 # Masking & activation
 mask_strategy: learnable
 output_activation: sigmoswish
-activation_beta: 1.0
+activation_beta: 2.0
 uncertainty_method: beta_nll
 
 # Comet.ml logging
