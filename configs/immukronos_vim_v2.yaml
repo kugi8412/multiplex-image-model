@@ -1,4 +1,19 @@
-# Exp 6a: ImmuKRONOS v2 (DINOv2 self-distillation with Hyperkernel)
+# ImmuKRONOS: Vision Mamba (ViM) backbone × DINOv2 × ImmuVis preprocessing
+# Isotropic SSM — ViT-S scale (384d, 6 heads) for faster training
+# No attention — pure 4-way selective scan
+backbone: "vim"
+dino_version: "v2"
+preprocessing: "immuvis"
+
+backbone_config:
+  layers_blocks: [12]
+  embedding_dims: [384]
+  block_parameters:
+    d_state: 16
+    d_conv: 4
+    expand: 2
+    ffn_expand: 4
+
 panel_config_path: "configs/all_panels_config.yaml"
 tokenizer_config_path: "configs/all_markers_tokenizer.yaml"
 
@@ -14,10 +29,10 @@ num_workers: 8
 
 patch_size: 8
 out_dim: 65536
-embed_dim: 768
+embed_dim: 384
 depth: 12
-num_heads: 12
-drop_path_rate: 0.3
+num_heads: 6
+drop_path_rate: 0.1
 num_register_tokens: 0
 
 device: "cuda"
@@ -41,13 +56,10 @@ teacher_momentum: 0.992
 channel_fraction: [0.75, 1.0]
 
 mask_strategy: zero
-output_activation: sigmoid
-activation_beta: 1.0
 
-checkpoints_dir: "checkpoints/exp6a_immukronos_v2"
+checkpoints_dir: "checkpoints/immukronos_vim_v2"
 save_checkpoint_freq: 10
 
-tags: ["exp6a", "immukronos", "dinov2", "hyperkernel"]
+tags: ["immukronos", "vim", "mamba", "ssm", "dinov2", "hyperkernel", "isotropic", "unified"]
 comet_project: "immu-vis"
 comet_workspace: "kugi8412"
-comet_api_key: "V6s4QJ97ca130GE8M4G4MlU5D"

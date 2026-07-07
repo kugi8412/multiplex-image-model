@@ -1,4 +1,6 @@
 # Exp 4: KRONOS DINOv3 (no Gram) + ImmuVis Preprocessing
+# Fixed: sequential marker IDs, smaller eff. batch, channel dropout
+# Train with: python train_kronos_dinov2v3.py configs/exp4_kronos_dinov3_immuvis.yaml
 training_mode: "dinov3"
 
 model_name: "vitb16"
@@ -15,6 +17,8 @@ marker_metadata_csv: "configs/marker_metadata.csv"
 file_extension: "npy"
 num_workers: 8
 
+channel_fraction: [0.75, 1.0]
+
 global_crops_number: 2
 global_crops_scale: [0.4, 1.0]
 global_crops_size: [128, 128]
@@ -25,7 +29,7 @@ local_crops_size: [64, 64]
 device: "cuda"
 epochs: 200
 batch_size: 4
-gradient_accumulation_steps: 256
+gradient_accumulation_steps: 128
 
 lr: 2.0e-4
 final_lr: 1.0e-6
@@ -47,6 +51,6 @@ from_checkpoint: null
 checkpoints_dir: "checkpoints/exp4_dinov3_immuvis"
 save_checkpoint_freq: 10
 
-tags: ["exp4", "kronos", "dinov3", "immuvis", "no-gram"]
+tags: ["exp4", "kronos", "dinov3", "immuvis", "no-gram", "seq-ids"]
 comet_project: "immu-vis"
 comet_workspace: "kugi8412"

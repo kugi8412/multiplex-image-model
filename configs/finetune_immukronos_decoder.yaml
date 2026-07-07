@@ -1,0 +1,40 @@
+# =======================================================
+# Konfiguracja Finetuningu Dekodera dla ImmuKRONOS v2
+# Resuming from a previously finetuned checkpoint
+# =======================================================
+
+# 1. PARAMETRY DEKODERA (Architektura)
+decoder:
+  decoded_embed_dim: 768
+  num_blocks: 4
+  scaling_factor: 8
+  num_outputs: 2
+
+  block_type:
+    type: vit
+    module_parameters:
+       num_heads: 12
+
+  hyperkernel:
+      kernel_size: 1
+      padding: 0
+      stride: 1
+      use_bias: true
+
+# 2. PARAMETRY TRENINGU (Finetuning)
+training:
+  epochs: 200
+  learning_rate: 0.0003  # 3e-4
+  final_lr: 0.000008     # 8e-6
+  batch_size: 8
+  weight_decay: 0.05
+  min_channels_frac: 0.75
+  fully_masked_channels_max_frac: 0.5
+  save_checkpoint_freq: 10
+
+# 3. USTAWIENIA LOGOWANIA (Comet.ml)
+comet:
+  api_key: "V6s4QJ97ca130GE8M4G4MlU5D"
+  project_name: "immu-vis"
+  workspace: "kugi8412"
+  tags: ["finetune_immukronos_decoder", "vit", "isotropic", "200epochs", "resumed"]

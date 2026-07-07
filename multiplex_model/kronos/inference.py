@@ -84,34 +84,43 @@ def create_model(
         hf_auth_token=hf_auth_token,
         cfg=cfg)
 
-    # Default arguments for vision transformer
+    # Default arguments for vision transformer — match original KRONOS release defaults
     vit_kwargs = dict(
-        img_size=224,
-        patch_size=16,
-        stride_size=16,
-        num_markers=512,
-        init_values=1.0e-05,
-        ffn_layer='mlp',
-        block_chunks=4,
-        num_register_tokens=16,
+        img_size=config.get("img_size", 224),
+        patch_size=config.get("patch_size", 16),
+        stride_size=config.get("stride_size", config.get("patch_size", 16)),
+        num_markers=config.get("num_markers", 512),
+        init_values=config.get("init_values", 1.0e-05),
+        ffn_layer=config.get("ffn_layer", "mlp"),
+        block_chunks=config.get("block_chunks", 4),
+        num_register_tokens=config.get("num_register_tokens", 16),
     )
-    if config["model_type"] in ['vits16', 'vitl16'] and config["token_overlap"]:
+    if config["model_type"] in ['vits16', 'vitl16'] and config.get("token_overlap", False):
         # Adjust stride size if token overlap is enabled
-        vit_kwargs['stride_size'] = 8
+        vit_kwargs['stride_size'] = vit_kwargs['patch_size'] // 2
 
     model = None
     embedding_dim = None
-    if config["model_type"] == 'vits16':
+    if config["model_type"] in ('vits16', 'vit_small'):
         # Create small vision transformer model
         model = vits.__dict__['vit_small'](**vit_kwargs)
         embedding_dim = 384
-    elif config["model_type"] == 'vitl16':
+    elif config["model_type"] in ('vitb16', 'vit_base'):
+        # Create base vision transformer model
+        model = vits.__dict__['vit_base'](**vit_kwargs)
+        embedding_dim = 768
+    elif config["model_type"] in ('vitl16', 'vit_large'):
         # Create large vision transformer model
         model = vits.__dict__['vit_large'](**vit_kwargs)
         embedding_dim = 1024
+    elif config["model_type"] in ('vitg14', 'vit_giant2'):
+        # Create giant vision transformer model
+        model = vits.__dict__['vit_giant2'](**vit_kwargs)
+        embedding_dim = 1536
     else:
         # Raise error for unsupported model type
-        raise ValueError(f'Unsupported model type: {config["model_type"]}')
+        raise ValueError(f'Unsupported model type: {config["model_type"]}. '
+                         f'Choose from: vits16, vitb16, vitl16, vitg14')
     
     return model, torch.float32, embedding_dim
 
@@ -157,12 +166,19 @@ def create_model_from_pretrained(
     # Load checkpoint if provided
     if checkpoint_path and checkpoint_path.startswith("hf_hub:"):
         from huggingface_hub import hf_hub_download
-        if config["model_type"] == 'vits16':
-            checkpoint_filename = "kronos_vits16_model.pt"
-        elif config["model_type"] == 'vitl16':
-            checkpoint_filename = "kronos_vitl16_model.pt"
-        else:
-            raise ValueError(f'Unsupported model type: {config["model_type"]}')
+        model_type = config["model_type"]
+        # Map model type to checkpoint filename
+        checkpoint_filenames = {
+            "vits16": "kronos_vits16_model.pt",
+            "vit_small": "kronos_vits16_model.pt",
+            "vitb16": "kronos_vitb16_model.pt",
+            "vit_base": "kronos_vitb16_model.pt",
+            "vitl16": "kronos_vitl16_model.pt",
+            "vit_large": "kronos_vitl16_model.pt",
+        }
+        if model_type not in checkpoint_filenames:
+            raise ValueError(f'No HuggingFace checkpoint for model type: {model_type}')
+        checkpoint_filename = checkpoint_filenames[model_type]
         
         # Download checkpoint from Hugging Face Hub
         checkpoint_path = hf_hub_download(

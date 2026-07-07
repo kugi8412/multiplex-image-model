@@ -49,6 +49,7 @@ from tqdm import tqdm
 from cross_sae.sparse_autoencoder import SAEOutput, build_sae
 from cross_sae.train_sae import (
     extract_immuvis_latents,
+    extract_kronos_latents,
     extract_virtues_latents,
     train_sae,
 )
@@ -273,14 +274,18 @@ def main():
         description="Train cross-sparse autoencoders and analyse model differences"
     )
 
-    # Model A (always ImmuVis)
+    # Model A
+    parser.add_argument(
+        "--source-a", default="immuvis", choices=["immuvis", "kronos"],
+        help="Source type for model A",
+    )
     parser.add_argument("--config-a", required=True, help="Config YAML for model A")
     parser.add_argument("--checkpoint-a", required=True, help="Checkpoint for model A")
-    parser.add_argument("--label-a", default="ImmuVis-A", help="Label for model A in plots")
+    parser.add_argument("--label-a", default="Model-A", help="Label for model A in plots")
 
-    # Model B — either ImmuVis or VirTues
+    # Model B — ImmuVis, KRONOS, or VirTues
     parser.add_argument(
-        "--source-b", default="immuvis", choices=["immuvis", "virtues"],
+        "--source-b", default="immuvis", choices=["immuvis", "kronos", "virtues"],
         help="Source type for model B",
     )
     parser.add_argument("--config-b", default=None, help="Config YAML for model B (ImmuVis)")
@@ -313,24 +318,32 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
 
     # ---- Extract latents ----
+    def _extract(source, config, checkpoint, label_default):
+        if source == "immuvis":
+            return extract_immuvis_latents(
+                config, checkpoint, device=device,
+                max_batches=args.max_batches,
+            )
+        elif source == "kronos":
+            return extract_kronos_latents(
+                config, checkpoint, device=device,
+                max_batches=args.max_batches,
+            )
+        else:
+            raise ValueError(f"Unsupported source: {source}")
+
     print("=" * 60)
-    print("Extracting latents from Model A...")
+    print(f"Extracting latents from Model A ({args.source_a})...")
     print("=" * 60)
-    latents_a, dim_a = extract_immuvis_latents(
-        args.config_a, args.checkpoint_a, device=device,
-        max_batches=args.max_batches,
-    )
+    latents_a, dim_a = _extract(args.source_a, args.config_a, args.checkpoint_a, args.label_a)
 
     print("\n" + "=" * 60)
-    print("Extracting latents from Model B...")
+    print(f"Extracting latents from Model B ({args.source_b})...")
     print("=" * 60)
-    if args.source_b == "immuvis":
+    if args.source_b in ("immuvis", "kronos"):
         if not args.config_b or not args.checkpoint_b:
-            parser.error("--config-b and --checkpoint-b required for ImmuVis model B")
-        latents_b, dim_b = extract_immuvis_latents(
-            args.config_b, args.checkpoint_b, device=device,
-            max_batches=args.max_batches,
-        )
+            parser.error("--config-b and --checkpoint-b required for model B")
+        latents_b, dim_b = _extract(args.source_b, args.config_b, args.checkpoint_b, args.label_b)
     else:
         if not args.virtues_checkpoint or not args.virtues_embeddings or not args.data_dir:
             parser.error("VirTues model B requires --virtues-checkpoint, --virtues-embeddings, --data-dir")

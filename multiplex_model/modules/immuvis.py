@@ -193,7 +193,20 @@ class MultiplexImageEncoder(nn.Module):
                 **encoder_kwargs,
             )
             hyperkernel_input_dim = ma_embedding_dims[-1]
-        hyperkernel_embedding_dim = pm_embedding_dims[0]
+
+        if len(pm_embedding_dims) > 0:
+            hyperkernel_embedding_dim = pm_embedding_dims[0]
+        else:
+            # Pretrained backbone (e.g. DINO): infer from encoder config target_dim
+            if isinstance(encoder_type, dict):
+                hyperkernel_embedding_dim = encoder_type.get("module_parameters", {}).get("target_dim")
+            else:
+                hyperkernel_embedding_dim = None
+            if hyperkernel_embedding_dim is None:
+                raise ValueError(
+                    "Cannot infer hyperkernel_embedding_dim: pm_embedding_dims is empty "
+                    "and encoder_type.module_parameters.target_dim is not specified"
+                )
 
         self.hyperkernel = Hyperkernel(
             num_channels=num_channels,
@@ -205,16 +218,26 @@ class MultiplexImageEncoder(nn.Module):
         self.norm = LayerNorm(hyperkernel_embedding_dim, data_format="channels_first")
 
         # pan-marker part
-        self.pan_marker_encoder = encoder_cls(
-            input_channels=hyperkernel_embedding_dim,
-            layers_blocks=pm_layers_blocks,
-            embedding_dims=pm_embedding_dims,
-            stem=False,
-            **encoder_kwargs,
-        )
+        if len(pm_layers_blocks) == 0:
+            # Pretrained backbone (e.g. DINO): encoder ignores layers_blocks/embedding_dims
+            self.pan_marker_encoder = encoder_cls(
+                input_channels=hyperkernel_embedding_dim,
+                **encoder_kwargs,
+            )
+            # Infer latent dim from the created encoder
+            latent_dim = getattr(self.pan_marker_encoder, "embed_dim", hyperkernel_embedding_dim)
+        else:
+            self.pan_marker_encoder = encoder_cls(
+                input_channels=hyperkernel_embedding_dim,
+                layers_blocks=pm_layers_blocks,
+                embedding_dims=pm_embedding_dims,
+                stem=False,
+                **encoder_kwargs,
+            )
+            latent_dim = pm_embedding_dims[-1]
 
         self.latent_norm = (
-            LayerNorm(pm_embedding_dims[-1], data_format="channels_first")
+            LayerNorm(latent_dim, data_format="channels_first")
             if use_latent_norm
             else nn.Identity()
         )
@@ -406,7 +429,21 @@ class MultiplexAutoencoder(nn.Module):
             decoder_config (dict): Configuration for the decoder.
         """
         super().__init__()
-        self.latent_dim = encoder_config["pm_embedding_dims"][-1]
+        pm_dims = encoder_config["pm_embedding_dims"]
+        if len(pm_dims) > 0:
+            self.latent_dim = pm_dims[-1]
+        else:
+            # Pretrained backbone (e.g. DINO): infer from encoder_type target_dim
+            enc_type = encoder_config.get("encoder_type", {})
+            if isinstance(enc_type, dict):
+                self.latent_dim = enc_type.get("module_parameters", {}).get("target_dim")
+            else:
+                self.latent_dim = None
+            if self.latent_dim is None:
+                raise ValueError(
+                    "Cannot infer latent_dim: pm_embedding_dims is empty and "
+                    "encoder_type.module_parameters.target_dim is not specified"
+                )
         self.num_channels = num_channels
 
         self.encoder = MultiplexImageEncoder(

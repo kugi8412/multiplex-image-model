@@ -1,0 +1,69 @@
+# ====================================================================
+# ImmuKRONOS ConvNeXt DINOv2 — Hierarchical ConvNeXt backbone (ImmuVisConv)
+# ====================================================================
+# Train: python train_immukronos_dino.py configs/exp_immukronos_convnext_v2.yaml
+
+training_mode: "dinov2"
+
+# ── Encoder (matches ImmuVisConv from issues.txt) ──
+encoder:
+  ma_layers_blocks: [4]              # 1 stage: 4-fold downsampling + 4 ConvNeXt blocks
+  ma_embedding_dims: [16]            # dim=16
+  pm_layers_blocks: [4, 4, 4]        # 3 stages
+  pm_embedding_dims: [192, 384, 768] # Progressive widening
+  encoder_type:
+    type: convnext
+    module_parameters:
+      block_parameters: {}
+  hyperkernel:
+    kernel_size: 1
+    stride: 1
+    padding: 0
+    use_bias: true
+
+out_dim: 65536
+drop_path_rate: 0.3
+
+# ── Data ──
+panel_config: "configs/all_panels_config.yaml"
+tokenizer_config: "configs/all_markers_tokenizer.yaml"
+marker_metadata_csv: "configs/marker_metadata.csv"
+file_extension: "npy"
+num_workers: 8
+
+# ── Multi-Crop ──
+global_crops_number: 2
+global_crops_size: 128
+global_crops_scale: [0.48, 1.0]
+local_crops_number: 6
+local_crops_size: 64
+local_crops_scale: [0.16, 0.48]
+
+# ── Optimization ──
+device: "cuda"
+epochs: 100
+warmup_epochs: 10
+batch_size: 8
+gradient_accumulation_steps: 128
+lr: 0.004
+final_lr: 1.0e-6
+weight_decay: 0.04
+weight_decay_final: 0.4
+clip_grad: 3.0
+
+# ── DINO Distillation ──
+warmup_teacher_temp_epochs: 30
+warmup_teacher_temp: 0.04
+teacher_temp: 0.07
+teacher_momentum: 0.992
+
+channel_fraction: [0.75, 1.0]
+
+# ── Checkpoints ──
+from_checkpoint: null
+checkpoints_dir: "checkpoints/immukronos_convnext_v2"
+save_checkpoint_freq: 10
+
+tags: ["immukronos", "convnext", "dinov2", "100ep"]
+comet_project: "immu-vis"
+comet_workspace: "kugi8412"

@@ -113,13 +113,13 @@ class DinoVisionTransformer(nn.Module):
         proj_bias=True,
         drop_path_rate=0.0,
         drop_path_uniform=False,
-        init_values=None,  # for layerscale: None or 0 => no layerscale
+        init_values=None,  # for layerscale: None or 0 => no layerscale. Original KRONOS uses 1e-5
         embed_layer=PatchEmbed,
         act_layer=nn.GELU,
         block_fn=Block,
         ffn_layer="mlp",
-        block_chunks=1,
-        num_register_tokens=0,
+        block_chunks=1,  # original KRONOS uses 4 for FSDP; set via config
+        num_register_tokens=0,  # original KRONOS uses 16; set via config
         interpolate_antialias=False,
         interpolate_offset=0.1,
     ):
@@ -357,13 +357,33 @@ class DinoVisionTransformer(nn.Module):
             "masks": masks,
         }
 
-    def forward(self, x, masks=None, marker_ids=None, is_training=False):
+    def forward(self, x, masks=None, marker_ids=None, is_training=False,
+                return_all_embeddings=True):
+        """Forward pass with configurable output mode.
+
+        Args:
+            x: (B, C_markers, H, W) multiplex image.
+            masks: Optional boolean mask for iBOT.
+            marker_ids: List of tensors with marker IDs per sample.
+            is_training: If True, return raw feature dict.
+            return_all_embeddings: If True (default, matches original KRONOS),
+                return (patch_embeddings, marker_embeddings, token_embeddings).
+                If False, return only CLS token.
+        Returns:
+            If is_training: raw feature dict.
+            If return_all_embeddings:
+                patch_embeddings: (B, embed_dim) — CLS token (global patch repr).
+                marker_embeddings: (B, C_markers, embed_dim) — mean-pooled per-marker.
+                token_embeddings: (B, C_markers, H', W', embed_dim) — full spatial.
+            Else:
+                CLS token (B, embed_dim).
+        """
         if marker_ids is None:
             marker_ids = [torch.tensor([i+4 for i in range(x.shape[1])], device=x.device) for _ in range(x.shape[0])]
         ret = self.forward_features(x, masks, marker_ids)
         if is_training:
             return ret
-        else:
+        elif return_all_embeddings:
             B, num_marker, w, h = x.shape
             tokens_per_row = len([i for i in range(0, h-self.patch_size+1, self.stride_size)])
             tokens_per_col = len([i for i in range(0, w-self.patch_size+1, self.stride_size)])
@@ -373,6 +393,8 @@ class DinoVisionTransformer(nn.Module):
             patch_marker_features = torch.mean(torch.mean(patch_token_features, dim=-2), dim=-2)
 
             return patch_features, patch_marker_features, patch_token_features
+        else:
+            return ret["x_norm_clstoken"]
 
     def _get_intermediate_layers_not_chunked(self, x, marker_ids,  n=1):
         x = self.prepare_tokens_with_masks(x, masks=None, marker_ids=marker_ids)

@@ -71,9 +71,16 @@ class PatchEmbed(nn.Module):
     def forward(self, x: Tensor) -> Tensor:
         B, C, H, W = x.shape
         patch_H, patch_W = self.patch_size
+        stride_H, stride_W = self.proj.stride
 
-        assert H % patch_H == 0, f"Input image height {H} is not a multiple of patch height {patch_H}"
-        assert W % patch_W == 0, f"Input image width {W} is not a multiple of patch width: {patch_W}"
+        # With overlapping patches (stride < patch_size), we only need the
+        # stride grid to tile evenly once the first patch is placed.
+        assert (H - patch_H) % stride_H == 0, (
+            f"Input height {H} does not tile evenly with patch_size={patch_H}, stride={stride_H}"
+        )
+        assert (W - patch_W) % stride_W == 0, (
+            f"Input width {W} does not tile evenly with patch_size={patch_W}, stride={stride_W}"
+        )
 
         # x = self.proj(x)  # B C H W
         patch_embeddings = []

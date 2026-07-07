@@ -103,7 +103,7 @@ def extract_immuvis_latents(
         decoder_config=decoder_cfg,
     ).to(device)
 
-    ckpt = torch.load(checkpoint_path, map_location=device, weights_only=True)
+    ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
     model.load_state_dict(ckpt.get("model_state_dict", ckpt), strict=False)
     model.eval()
 
@@ -221,6 +221,110 @@ def extract_virtues_latents(
 
 
 # ===================================================================
+# Latent extraction — ImmunoKRONOS (ImmuvisDINO)
+# ===================================================================
+
+@torch.no_grad()
+def extract_kronos_latents(
+    config_path: str,
+    checkpoint_path: str,
+    device: str = "cuda",
+    max_batches: int | None = None,
+    split: str = "train",
+) -> tuple[torch.Tensor, int]:
+    """Extract CLS-token latents from a frozen ImmunoKRONOS v2 model.
+
+    Returns:
+        latents: (N, D) tensor of CLS token embeddings.
+        latent_dim: D.
+    """
+    import sys
+    from ruamel.yaml import YAML
+
+    from multiplex_model.data import DatasetFromTIFF, PanelBatchSampler, TestCrop
+
+    yaml_loader = YAML(typ="safe")
+    with open(config_path) as f:
+        raw_config = yaml_loader.load(f)
+
+    panel_config_path = raw_config.get("panel_config", raw_config.get("panel_config_path"))
+    tokenizer_path = raw_config.get("tokenizer_config", raw_config.get("tokenizer_config_path",
+                                    "configs/all_markers_tokenizer.yaml"))
+    PANEL_CONFIG = YAML().load(open(panel_config_path))
+    TOKENIZER = YAML().load(open(tokenizer_path))
+
+    img_size = raw_config.get("global_crops_size", 128)
+    if isinstance(img_size, list):
+        img_size = img_size[0]
+
+    dataset = DatasetFromTIFF(
+        panels_config=PANEL_CONFIG,
+        split=split,
+        marker_tokenizer=TOKENIZER,
+        transform=TestCrop(img_size),
+        use_preprocessing=False,
+        use_butterworth_filter=True,
+        use_clip_normalization=True,
+        file_extension=raw_config.get("file_extension", "npy"),
+    )
+    sampler = PanelBatchSampler(dataset, batch_size=4, shuffle=False)
+    dataloader = DataLoader(
+        dataset, batch_sampler=sampler,
+        num_workers=raw_config.get("num_workers", 4),
+        pin_memory=True,
+    )
+
+    # Build ImmuvisDINO model
+    sys.path.insert(0, os.getcwd())
+    from train_kronos_immuvis_v2 import ImmuvisDINO
+
+    num_markers = len(TOKENIZER)
+    patch_size = raw_config.get("patch_size", 8)
+    out_dim = raw_config.get("out_dim", 65536)
+
+    model = ImmuvisDINO(
+        num_markers=num_markers, patch_size=patch_size, out_dim=out_dim,
+    ).to(device)
+
+    ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    if "student_state_dict" in ckpt:
+        model.load_state_dict(ckpt["student_state_dict"], strict=False)
+    else:
+        model.load_state_dict(ckpt, strict=False)
+    model.eval()
+
+    all_latents = []
+    for batch_idx, (img, channel_ids, _panel, _path) in enumerate(
+        tqdm(dataloader, desc=f"Extracting KRONOS latents ({split})")
+    ):
+        if max_batches is not None and batch_idx >= max_batches:
+            break
+        img = img.to(device, dtype=torch.float32)
+        channel_ids = channel_ids.to(device, dtype=torch.long)
+
+        B, C, H, W = img.shape
+        x_hk = img.reshape(B * C, 1, H, W)
+        x_enc = model.hyperkernel(x_hk, channel_ids)
+        x_enc = x_enc.flatten(2).transpose(1, 2)
+        h_p, w_p = H // model.patch_size, W // model.patch_size
+        N = h_p * w_p
+        cls_tokens = model.cls_token.expand(B, -1, -1)
+        x_enc = torch.cat((cls_tokens, x_enc), dim=1)
+        x_enc = x_enc + model.pos_embed[:, :N + 1, :]
+        for blk in model.blocks:
+            x_enc = blk(x_enc)
+        x_enc = model.norm(x_enc)
+
+        # CLS token: (B, D)
+        cls_out = x_enc[:, 0].float().cpu()
+        all_latents.append(cls_out)
+
+    latents = torch.cat(all_latents, dim=0)
+    print(f"Extracted {latents.shape[0]} CLS tokens of dim {latents.shape[1]}")
+    return latents, latents.shape[1]
+
+
+# ===================================================================
 # SAE training loop
 # ===================================================================
 
@@ -317,7 +421,7 @@ def main():
         description="Train a sparse autoencoder on frozen model latents"
     )
     parser.add_argument(
-        "--source", required=True, choices=["immuvis", "virtues"],
+        "--source", required=True, choices=["immuvis", "virtues", "kronos"],
         help="Source model type",
     )
 
@@ -356,6 +460,13 @@ def main():
         if not args.config or not args.checkpoint:
             parser.error("--config and --checkpoint required for ImmuVis")
         latents, latent_dim = extract_immuvis_latents(
+            args.config, args.checkpoint, device=device,
+            max_batches=args.max_batches,
+        )
+    elif args.source == "kronos":
+        if not args.config or not args.checkpoint:
+            parser.error("--config and --checkpoint required for KRONOS")
+        latents, latent_dim = extract_kronos_latents(
             args.config, args.checkpoint, device=device,
             max_batches=args.max_batches,
         )

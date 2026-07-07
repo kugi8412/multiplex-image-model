@@ -1,0 +1,67 @@
+# I-JEPA: ViT backbone × VirTues preprocessing
+# Gaussian blur + z-standardization instead of butterworth + clip
+# Train with: python train_ijepa.py configs/ijepa_vit_virtues.yaml
+backbone: "kronos_vit"
+dino_version: "v2"
+preprocessing: "virtues"
+
+panel_config_path: "configs/all_panels_config.yaml"
+tokenizer_config_path: "configs/all_markers_tokenizer.yaml"
+
+crop_size: 128
+crop_scale: [0.48, 1.0]
+
+num_workers: 8
+
+patch_size: 8
+out_dim: 65536
+embed_dim: 768
+depth: 12
+num_heads: 12
+drop_path_rate: 0.1
+num_register_tokens: 0
+
+predictor_dim: 384
+predictor_depth: 6
+predictor_num_heads: 6
+
+num_target_blocks: 4
+target_scale: [0.15, 0.2]
+target_aspect_ratio: [0.75, 1.5]
+
+# I-JEPA context sampling:
+#   "block"      = paper-faithful — one large context block minus overlapping targets
+#   "complement" = simplified — every non-target patch is context
+context_strategy: block
+context_scale: [0.85, 1.0]
+context_aspect_ratio: [1.0, 1.0]
+
+device: "cuda"
+epochs: 200
+warmup_epochs: 15
+
+batch_size: 16
+gradient_accumulation_steps: 64
+
+lr: 1.0e-3
+final_lr: 1.0e-6
+weight_decay: 0.04
+weight_decay_final: 0.4
+clip_grad: 1.0
+
+teacher_momentum: 0.996
+
+channel_fraction: [0.75, 1.0]
+
+# Mask token placed at prediction targets by the I-JEPA predictor (and the
+# encoder iBOT mask token for spatial backbones):
+#   "learnable_full"    = distinct learnable token per patch slot (recommended)
+#   "learnable" / "zero" = single shared token
+mask_strategy: learnable_full
+
+checkpoints_dir: "checkpoints/ijepa_vit_virtues"
+save_checkpoint_freq: 10
+
+tags: ["ijepa", "vit", "hyperkernel", "virtues", "representation-prediction"]
+comet_project: "immu-vis"
+comet_workspace: "kugi8412"

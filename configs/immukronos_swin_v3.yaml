@@ -1,4 +1,15 @@
-# Exp 6b: ImmuKRONOS v3 (DINOv3 self-distillation with Hyperkernel)
+# ImmuKRONOS: Swin Transformer backbone × DINOv3
+# Hierarchical Swin with Hyperkernel stem + DINOv3 (iBOT + KoLeo)
+backbone: "swin"
+dino_version: "v3"
+
+# Swin-specific: 3 hierarchical stages with window attention
+backbone_config:
+  layers_blocks: [4, 4, 4]
+  embedding_dims: [192, 384, 768]
+  block_parameters:
+    window_size: 8
+
 panel_config_path: "configs/all_panels_config.yaml"
 tokenizer_config_path: "configs/all_markers_tokenizer.yaml"
 
@@ -18,7 +29,7 @@ embed_dim: 768
 depth: 12
 num_heads: 12
 drop_path_rate: 0.1
-num_register_tokens: 4
+num_register_tokens: 0
 ibot_out_dim: 8192
 
 device: "cuda"
@@ -45,14 +56,11 @@ ibot_mask_ratio: 0.3
 ibot_loss_weight: 1.0
 koleo_loss_weight: 0.1
 
-use_gram_loss: false
 mask_strategy: learnable
-output_activation: sigmoid
-activation_beta: 1.0
 
-checkpoints_dir: "checkpoints/exp6b_immukronos_v3"
+checkpoints_dir: "checkpoints/immukronos_swin_v3"
 save_checkpoint_freq: 10
 
-tags: ["exp6b", "immukronos", "dinov3", "hyperkernel", "ibot", "swiglu", "rope"]
+tags: ["immukronos", "swin", "dinov3", "hyperkernel", "hierarchical", "ibot", "unified"]
 comet_project: "immu-vis"
 comet_workspace: "kugi8412"

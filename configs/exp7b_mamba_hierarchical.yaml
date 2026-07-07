@@ -1,12 +1,12 @@
-# Exp 7b: Mamba Hierarchical — Multi-scale ViM encoder (64→192→384→768)
-# Comparable to Swin-like hierarchical: same stage structure, embed dims.
+# Exp 7b: Mamba Hierarchical — Multi-scale ViM encoder (64→192→384)
+# Fixed: kernel_size 8 in hyperkernel to downsample early (avoids OOM)
 # Train with: python train_masked_model.py configs/exp7b_mamba_hierarchical.yaml
 encoder:
     ma_layers_blocks: [4]
     ma_embedding_dims: [64]
 
-    pm_layers_blocks: [4, 4, 4]
-    pm_embedding_dims: [192, 384, 768]
+    pm_layers_blocks: [4, 4]
+    pm_embedding_dims: [192, 384]
 
     encoder_type:
       type: vim
@@ -18,19 +18,20 @@ encoder:
           expand: 2
 
     hyperkernel:
-      kernel_size: 1
+      kernel_size: 8
       padding: 0
-      stride: 1
+      stride: 8
       use_bias: true
 
 decoder:
-  decoded_embed_dim: 768
+  decoded_embed_dim: 384
   num_blocks: 1
+  scaling_factor: 8
 
   block_type:
     type: vit
     module_parameters:
-       num_heads: 12
+       num_heads: 6
 
   hyperkernel:
       kernel_size: 1
@@ -43,14 +44,14 @@ panel_config: configs/all_panels_config.yaml
 tokenizer_config: configs/all_markers_tokenizer.yaml
 input_image_size: [128, 128]
 num_workers: 8
-batch_size: 8
+batch_size: 2
 
 # Training configuration
 device: cuda
 lr: 3e-4
 final_lr: 8e-6
 weight_decay: 0.05
-gradient_accumulation_steps: 1
+gradient_accumulation_steps: 4
 epochs: 200
 frac_warmup_steps: 0.1
 min_channels_frac: 0.75
@@ -65,10 +66,10 @@ beta: 1.0
 # Masking & activation
 mask_strategy: learnable
 output_activation: sigmoswish
-activation_beta: 2.0
+activation_beta: 1.0
 uncertainty_method: beta_nll
 
 # Comet.ml logging
-tags: ["exp7b", "mamba", "hierarchical", "vim", "200epochs"]
+tags: ["exp7b", "mamba", "hierarchical", "vim", "200epochs", "fixed-oom"]
 comet_project: "immu-vis"
 comet_workspace: "kugi8412"

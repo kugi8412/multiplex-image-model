@@ -1,4 +1,16 @@
-# Exp 6a: ImmuKRONOS v2 (DINOv2 self-distillation with Hyperkernel)
+# ImmuKRONOS: Swin Transformer backbone × DINOv2
+# Hierarchical Swin Transformer with Hyperkernel stem + DINOv2 self-distillation
+backbone: "swin"
+dino_version: "v2"
+
+# Swin-specific: 3 hierarchical stages with window attention
+# From issues.txt: ImmuVisSwin = Swin Transformer, same 3-stage structure
+backbone_config:
+  layers_blocks: [4, 4, 4]
+  embedding_dims: [192, 384, 768]
+  block_parameters:
+    window_size: 8
+
 panel_config_path: "configs/all_panels_config.yaml"
 tokenizer_config_path: "configs/all_markers_tokenizer.yaml"
 
@@ -15,9 +27,9 @@ num_workers: 8
 patch_size: 8
 out_dim: 65536
 embed_dim: 768
-depth: 12
+depth: 12      # ignored by spatial backbone
 num_heads: 12
-drop_path_rate: 0.3
+drop_path_rate: 0.1
 num_register_tokens: 0
 
 device: "cuda"
@@ -41,13 +53,10 @@ teacher_momentum: 0.992
 channel_fraction: [0.75, 1.0]
 
 mask_strategy: zero
-output_activation: sigmoid
-activation_beta: 1.0
 
-checkpoints_dir: "checkpoints/exp6a_immukronos_v2"
+checkpoints_dir: "checkpoints/immukronos_swin_v2"
 save_checkpoint_freq: 10
 
-tags: ["exp6a", "immukronos", "dinov2", "hyperkernel"]
+tags: ["immukronos", "swin", "dinov2", "hyperkernel", "hierarchical", "unified"]
 comet_project: "immu-vis"
 comet_workspace: "kugi8412"
-comet_api_key: "V6s4QJ97ca130GE8M4G4MlU5D"

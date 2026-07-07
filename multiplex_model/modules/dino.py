@@ -28,7 +28,7 @@ class DinoEncoder(Encoder):
         freeze_backbone: bool = False,
         target_dim: int | None = None,
         img_size: int = 128,
-        patch_size: int | None = None,  # <--- DODANO ODBIÓR Z YAMLA
+        patch_size: int | None = None,  # <--- Wartość 8 przychodzi z pliku YAML
         **kwargs,
     ):
         super().__init__()
@@ -44,48 +44,51 @@ class DinoEncoder(Encoder):
                 "base": "vit_base_patch14_dinov2.lvd142m",
                 "large": "vit_large_patch14_dinov2.lvd142m"
             }
+            native_patch_size = 14
         elif version == "v3":
             size_map = {
                 "small": "vit_small_patch16_dinov3.lvd1689m", 
                 "base": "vit_base_patch16_dinov3.lvd1689m",   
                 "large": "vit_large_patch16_dinov3.lvd1689m"  
             }
+            native_patch_size = 16
         else:
             raise ValueError(f"Wrong DINO version: {version}. Choose 'v2' or 'v3'.")
             
         model_name = size_map.get(model_size)
-
         if model_name is None:
             raise ValueError(f"Wrong DINO size: {model_size}. Choose 'small', 'base' lub 'large'.")
+
+        self.patch_size = patch_size if patch_size is not None else native_patch_size
+        
+        # --- KROK 1: HACK DLA TIMM (WYMUSZENIE ODPOWIEDNIEJ SIATKI) ---
+        # Obliczamy jakiej wielkości siatki naprawdę chcemy:
+        grid_size = img_size // self.patch_size 
+        
+        # Oszukujemy timm odpowiednio większym img_size, by stworzył pozycje 
+        # dla odpowiedniej liczby patchy korzystając ze swojego native_patch_size
+        timm_fake_img_size = grid_size * native_patch_size
        
-        # KROK 1: Ładujemy bazowy model (np. z łatką 16)
         self.backbone = timm.create_model(
             model_name, 
             pretrained=True, 
             num_classes=0, 
             in_chans=input_channels, 
-            img_size=img_size
+            img_size=timm_fake_img_size,  # <--- Podajemy np. 256 zamiast 128
+            dynamic_img_size=True
         )
         
-        native_patch_size = self.backbone.patch_embed.patch_size[0]
-        self.patch_size = patch_size if patch_size is not None else native_patch_size
         self.native_embed_dim = self.backbone.embed_dim
         
-        # KROK 2: Chirurgia modelu (Jeśli YAML wymusza łatkę 8, a model ma 16)
-        # KROK 2: Chirurgia modelu (Jeśli YAML wymusza łatkę 8, a model ma 16)
-        if self.patch_size != native_patch_size:
-            print(f"🔧 Adapting DINO from native patch {native_patch_size}x{native_patch_size} to requested {self.patch_size}x{self.patch_size}...")
+        # --- KROK 2: CHIRURGIA (Ręczna zmiana łatki na docelową i wstawienie img_size 128) ---
+        if self.patch_size != native_patch_size or img_size != timm_fake_img_size:
+            print(f"DINO (natywny patch {native_patch_size}) do Twojej łatki {self.patch_size} (obraz {img_size}x{img_size})...")
             
             old_pe = self.backbone.patch_embed
-            
-            # Zgrywamy oryginalne ustawienia formatowania z timm (żeby nie zepsuć wymiarów!)
             pe_kwargs = {}
-            if hasattr(old_pe, 'flatten'):
-                pe_kwargs['flatten'] = old_pe.flatten
-            if hasattr(old_pe, 'output_fmt'):
-                pe_kwargs['output_fmt'] = old_pe.output_fmt
+            if hasattr(old_pe, 'flatten'): pe_kwargs['flatten'] = old_pe.flatten
+            if hasattr(old_pe, 'output_fmt'): pe_kwargs['output_fmt'] = old_pe.output_fmt
                 
-            # Podmieniamy warstwę konwolucyjną na nową, zachowując stary format
             self.backbone.patch_embed = PatchEmbed(
                 img_size=img_size,
                 patch_size=self.patch_size,
@@ -94,24 +97,26 @@ class DinoEncoder(Encoder):
                 **pe_kwargs
             )
             
-            # Resetujemy tradycyjną mapę pozycyjną (TYLKO jeśli model jej używa)
-            # (Modele oparte na EVA często używają RoPE i w ogóle nie mają pos_embed!)
+            # --- KROK 3: OCHRONA WIEDZY PRZESTRZENNEJ ---
             if hasattr(self.backbone, 'pos_embed') and self.backbone.pos_embed is not None:
-                num_patches = self.backbone.patch_embed.num_patches
-                num_prefix_tokens = self.backbone.num_prefix_tokens
+                new_num_patches = self.backbone.patch_embed.num_patches
+                num_prefix = getattr(self.backbone, 'num_prefix_tokens', 1) # np. CLS token
+                current_pos_len = self.backbone.pos_embed.shape[1]
                 
-                self.backbone.pos_embed = nn.Parameter(
-                    torch.zeros(1, num_patches + num_prefix_tokens, self.native_embed_dim)
-                )
-                trunc_normal_(self.backbone.pos_embed, std=0.02)
-        
-        # KROK 3: Inteligentne Freezowanie
+                if current_pos_len == new_num_patches + num_prefix:
+                    print(f"Siatka wygenerowała {new_num_patches} patchy. Zintegrowano pre-trenowane pozycje bez utraty wiedzy!")
+                else:
+                    print(f"Resetowanie pos_embed (stary: {current_pos_len}, wymagany: {new_num_patches + num_prefix}).")
+                    self.backbone.pos_embed = nn.Parameter(
+                        torch.zeros(1, new_num_patches + num_prefix, self.native_embed_dim)
+                    )
+                    trunc_normal_(self.backbone.pos_embed, std=0.02)
+
+        # KROK 4: Inteligentne Freezowanie
         if self.freeze_backbone:
             for name, param in self.backbone.named_parameters():
-                # Nie mrozimy nowej warstwy wejściowej ani pozycji
                 if "patch_embed" not in name and "pos_embed" not in name:
                     param.requires_grad = False
-
             self.backbone.eval()
                 
         self.embed_dim = target_dim if target_dim is not None else self.native_embed_dim

@@ -64,10 +64,11 @@ beta: 1.0
 # Masking & activation — identical to exp7a/7b
 mask_strategy: learnable
 output_activation: sigmoswish
-activation_beta: 2.0
+activation_beta: 1.0
 uncertainty_method: beta_nll
 
 # Comet.ml logging
 tags: ["exp7c", "vit", "isotropic", "baseline", "200epochs"]
 comet_project: "immu-vis"
 comet_workspace: "kugi8412"
+

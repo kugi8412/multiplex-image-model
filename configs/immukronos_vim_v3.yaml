@@ -1,4 +1,18 @@
-# Exp 6b: ImmuKRONOS v3 (DINOv3 self-distillation with Hyperkernel)
+# ImmuKRONOS: Vision Mamba (ViM) backbone × DINOv3 × ImmuVis preprocessing
+# Isotropic SSM — ViT-S scale (384d, 6 heads) for faster training
+backbone: "vim"
+dino_version: "v3"
+preprocessing: "immuvis"
+
+backbone_config:
+  layers_blocks: [12]
+  embedding_dims: [384]
+  block_parameters:
+    d_state: 16
+    d_conv: 4
+    expand: 2
+    ffn_expand: 4
+
 panel_config_path: "configs/all_panels_config.yaml"
 tokenizer_config_path: "configs/all_markers_tokenizer.yaml"
 
@@ -14,11 +28,11 @@ num_workers: 8
 
 patch_size: 8
 out_dim: 65536
-embed_dim: 768
+embed_dim: 384
 depth: 12
-num_heads: 12
+num_heads: 6
 drop_path_rate: 0.1
-num_register_tokens: 4
+num_register_tokens: 0
 ibot_out_dim: 8192
 
 device: "cuda"
@@ -45,14 +59,11 @@ ibot_mask_ratio: 0.3
 ibot_loss_weight: 1.0
 koleo_loss_weight: 0.1
 
-use_gram_loss: false
 mask_strategy: learnable
-output_activation: sigmoid
-activation_beta: 1.0
 
-checkpoints_dir: "checkpoints/exp6b_immukronos_v3"
+checkpoints_dir: "checkpoints/immukronos_vim_v3"
 save_checkpoint_freq: 10
 
-tags: ["exp6b", "immukronos", "dinov3", "hyperkernel", "ibot", "swiglu", "rope"]
+tags: ["immukronos", "vim", "mamba", "ssm", "dinov3", "hyperkernel", "isotropic", "ibot", "unified"]
 comet_project: "immu-vis"
 comet_workspace: "kugi8412"

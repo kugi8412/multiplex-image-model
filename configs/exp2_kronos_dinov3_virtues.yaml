@@ -1,5 +1,6 @@
 # Exp 2: KRONOS DINOv3 (no Gram) + VirTues-Lite on arcsinh data
 # Preprocessing: Gaussian blur + z-standardization + channel dropout (no butterworth/clip)
+# Standardized: sequential marker IDs, effective batch 512
 training_mode: "dinov3"
 preprocessing_mode: "virtues_arcsinh"
 
@@ -29,7 +30,7 @@ local_crops_size: [64, 64]
 device: "cuda"
 epochs: 200
 batch_size: 4
-gradient_accumulation_steps: 256
+gradient_accumulation_steps: 128
 
 lr: 2.0e-4
 final_lr: 1.0e-6
@@ -51,6 +52,6 @@ from_checkpoint: null
 checkpoints_dir: "checkpoints/exp2_dinov3_virtues"
 save_checkpoint_freq: 10
 
-tags: ["exp2", "kronos", "dinov3", "virtues", "no-gram"]
+tags: ["exp2", "kronos", "dinov3", "virtues", "no-gram", "seq-ids"]
 comet_project: "immu-vis"
 comet_workspace: "kugi8412"

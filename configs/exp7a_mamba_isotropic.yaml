@@ -1,12 +1,12 @@
-# Exp 7a: Mamba Isotropic — Flat 16-layer ViM encoder (768d)
-# Comparable to ViT isotropic: same depth, embed dim, hyperkernel, decoder.
+# Exp 7a: Mamba Isotropic — Flat 12-layer ViM encoder (384d)
+# Optimized: depth 16→12, d_state 8→16 for better speed/quality tradeoff
 # Train with: python train_masked_model.py configs/exp7a_mamba_isotropic.yaml
 encoder:
     ma_layers_blocks: []
     ma_embedding_dims: []
 
-    pm_layers_blocks: [16]
-    pm_embedding_dims: [768]
+    pm_layers_blocks: [12]
+    pm_embedding_dims: [384]
 
     encoder_type:
       type: vim
@@ -23,13 +23,13 @@ encoder:
       use_bias: true
 
 decoder:
-  decoded_embed_dim: 768
+  decoded_embed_dim: 384
   num_blocks: 1
 
   block_type:
     type: vit
     module_parameters:
-       num_heads: 12
+       num_heads: 6
 
   hyperkernel:
       kernel_size: 1
@@ -42,14 +42,14 @@ panel_config: configs/all_panels_config.yaml
 tokenizer_config: configs/all_markers_tokenizer.yaml
 input_image_size: [128, 128]
 num_workers: 8
-batch_size: 8
+batch_size: 2
 
 # Training configuration
 device: cuda
 lr: 3e-4
 final_lr: 8e-6
 weight_decay: 0.05
-gradient_accumulation_steps: 1
+gradient_accumulation_steps: 4
 epochs: 200
 frac_warmup_steps: 0.1
 min_channels_frac: 0.75
@@ -64,10 +64,10 @@ beta: 1.0
 # Masking & activation
 mask_strategy: learnable
 output_activation: sigmoswish
-activation_beta: 2.0
+activation_beta: 1.0
 uncertainty_method: beta_nll
 
 # Comet.ml logging
-tags: ["exp7a", "mamba", "isotropic", "vim", "200epochs"]
+tags: ["exp7a", "mamba", "isotropic", "vim", "200epochs", "optimized"]
 comet_project: "immu-vis"
 comet_workspace: "kugi8412"
