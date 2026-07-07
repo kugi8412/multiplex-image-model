@@ -13,16 +13,21 @@ model_name: "vitb16"              # vits16 (384d), vitb16 (768d), vitl16 (1024d)
 out_dim: 65536                    # DINO projection head output dim
 drop_path_rate: 0.3               # Stochastic depth (student only; teacher = 0)
 patch_size: 8                     # ViT patch size
-num_register_tokens: 0            # No register tokens in DINOv2
+stride_size: null                 # Patch stride (null => same as patch_size = non-overlapping;
+                                  #   set to patch_size/2 for overlapping, e.g. 8 for original KRONOS)
+num_register_tokens: 0            # No register tokens in DINOv2 (original KRONOS uses 16)
 ffn_layer: "mlp"                  # Standard MLP FFN (DINOv2 default)
+init_values: null                 # LayerScale init (null=disabled; original KRONOS uses 1.0e-5)
+block_chunks: 1                   # Block chunking for FSDP wrap (original KRONOS uses 4)
 mask_strategy: zero               # zero | negative | learnable
 output_activation: sigmoid        # sigmoid | hard_sigmoid | sigmoswish
 activation_beta: 1.0              # beta for sigmoswish
-# init_values: null               # LayerScale init (null = disabled)
 
 # 2. Data
 panel_config: "configs/all_panels_config.yaml"
 tokenizer_config: "configs/all_markers_tokenizer.yaml"
+marker_metadata_csv: "configs/marker_metadata.csv"  # Path to marker ID mapping CSV
+                                                     # (can override via --marker-metadata-csv CLI arg)
 file_extension: "npy"
 num_workers: 8
 

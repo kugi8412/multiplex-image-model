@@ -1,0 +1,69 @@
+# ImmuKRONOS: Vision Mamba (ViM) backbone × DINOv3 × VirTues preprocessing
+# Isotropic SSM — ViT-S scale (384d, 6 heads) for faster training
+backbone: "vim"
+dino_version: "v3"
+preprocessing: "virtues"
+
+backbone_config:
+  layers_blocks: [12]
+  embedding_dims: [384]
+  block_parameters:
+    d_state: 16
+    d_conv: 4
+    expand: 2
+    ffn_expand: 4
+
+panel_config_path: "configs/all_panels_config.yaml"
+tokenizer_config_path: "configs/all_markers_tokenizer.yaml"
+
+global_crops_number: 2
+global_crops_size: 128
+global_crops_scale: [0.4, 1.0]
+
+local_crops_number: 6
+local_crops_size: 64
+local_crops_scale: [0.1, 0.4]
+
+num_workers: 8
+
+patch_size: 8
+out_dim: 65536
+embed_dim: 384
+depth: 12
+num_heads: 6
+drop_path_rate: 0.1
+num_register_tokens: 0
+ibot_out_dim: 8192
+
+device: "cuda"
+epochs: 200
+warmup_epochs: 15
+
+batch_size: 4
+gradient_accumulation_steps: 256
+
+lr: 2.0e-4
+final_lr: 1.0e-6
+weight_decay: 0.04
+weight_decay_final: 0.4
+clip_grad: 1.0
+
+warmup_teacher_temp_epochs: 30
+warmup_teacher_temp: 0.04
+teacher_temp: 0.07
+teacher_momentum: 0.996
+
+channel_fraction: [0.75, 1.0]
+
+ibot_mask_ratio: 0.3
+ibot_loss_weight: 1.0
+koleo_loss_weight: 0.1
+
+mask_strategy: learnable
+
+checkpoints_dir: "checkpoints/immukronos_vim_v3_virtues"
+save_checkpoint_freq: 10
+
+tags: ["immukronos", "vim", "mamba", "ssm", "dinov3", "hyperkernel", "isotropic", "virtues", "ibot", "unified"]
+comet_project: "immu-vis"
+comet_workspace: "kugi8412"
