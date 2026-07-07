@@ -78,11 +78,17 @@ class IJEPAPredictor(nn.Module):
     """
 
     def __init__(self, embed_dim, predictor_dim=384, depth=6, num_heads=6,
-                 max_patches=256):
+                 max_patches=256, mask_strategy="learnable"):
         super().__init__()
         self.max_patches = max_patches
+        self.mask_strategy = mask_strategy
         self.input_proj = nn.Linear(embed_dim, predictor_dim)
-        self.mask_token = nn.Parameter(torch.zeros(1, 1, predictor_dim))
+        if mask_strategy == "learnable_full":
+            # Full per-position learnable mask: one distinct token per patch slot.
+            self.mask_token = nn.Parameter(torch.zeros(1, max_patches, predictor_dim))
+        else:
+            # Single shared learnable mask token, broadcast to every target slot.
+            self.mask_token = nn.Parameter(torch.zeros(1, 1, predictor_dim))
         self.pos_embed = nn.Parameter(torch.zeros(1, max_patches, predictor_dim))
         self.blocks = nn.ModuleList([
             KronosBlock(
@@ -119,8 +125,11 @@ class IJEPAPredictor(nn.Module):
         ctx_proj = self.input_proj(context_tokens)  # (B, N_ctx, predictor_dim)
         D_pred = ctx_proj.shape[-1]
 
-        # Build full-length sequence: mask_token at all positions initially
-        x = self.mask_token.expand(B, N, -1).clone()  # (B, N, predictor_dim)
+        # Build full-length sequence: mask token(s) at all positions initially.
+        if self.mask_token.shape[1] == 1:
+            x = self.mask_token.expand(B, N, -1).clone()  # shared token
+        else:
+            x = self.mask_token[:, :N, :].expand(B, -1, -1).clone()  # per-position
 
         # Scatter context features into their original positions
         for i in range(B):
@@ -187,6 +196,55 @@ def generate_ijepa_masks(batch_size, h_p, w_p, num_targets=4,
                 target_mask[b, start_idx:end_idx] = True
 
     return target_mask
+
+
+def generate_context_mask(target_mask, h_p, w_p, context_scale=(0.85, 1.0),
+                          context_aspect_ratio=(1.0, 1.0), device=None):
+    """Generate paper-faithful I-JEPA context masks ("block" strategy).
+
+    Samples ONE large context block per sample (scale ~0.85-1.0 of the image),
+    then removes any positions overlapping the target blocks — matching the
+    original I-JEPA masking. Falls back to the full complement of the targets
+    for any sample that would otherwise be left with no context patches.
+
+    Args:
+        target_mask: (B, N) bool — True at target (to-predict) positions.
+        h_p, w_p: patch grid dimensions (height, width in patches).
+        context_scale: (min, max) fraction of total patches in the context block.
+        context_aspect_ratio: (min, max) aspect ratio of the context block.
+        device: torch device.
+
+    Returns:
+        context_mask: (B, N) bool — True at context positions to KEEP.
+    """
+    B, N = target_mask.shape
+    context_mask = torch.zeros(B, N, dtype=torch.bool, device=device)
+
+    for b in range(B):
+        scale = random.uniform(*context_scale)
+        n_patches = max(1, int(N * scale))
+        ar = random.uniform(*context_aspect_ratio)
+        h_block = max(1, int(round(math.sqrt(n_patches * ar))))
+        w_block = max(1, int(round(n_patches / max(h_block, 1))))
+        h_block = min(h_block, h_p)
+        w_block = min(w_block, w_p)
+
+        top = random.randint(0, max(0, h_p - h_block))
+        left = random.randint(0, max(0, w_p - w_block))
+
+        for row in range(top, min(top + h_block, h_p)):
+            start_idx = row * w_p + left
+            end_idx = row * w_p + min(left + w_block, w_p)
+            context_mask[b, start_idx:end_idx] = True
+
+        # Remove target positions that fall inside the context block.
+        context_mask[b] &= ~target_mask[b]
+
+        # Guard: never leave a sample without any context patch.
+        if not context_mask[b].any():
+            context_mask[b] = ~target_mask[b]
+
+    return context_mask
 
 
 def downsample_mask(mask, h_in, w_in, h_out, w_out):
@@ -389,6 +447,7 @@ def main():
         depth=predictor_depth,
         num_heads=predictor_num_heads,
         max_patches=max(n_out_patches, 256),
+        mask_strategy=config.get("mask_strategy", "zero"),
     ).to(device)
 
     student_params = sum(p.numel() for p in student.parameters() if p.requires_grad)
@@ -421,6 +480,27 @@ def main():
     num_target_blocks = config.get("num_target_blocks", 4)
     target_scale = tuple(config.get("target_scale", [0.15, 0.2]))
     target_aspect_ratio = tuple(config.get("target_aspect_ratio", [0.75, 1.5]))
+
+    # Context sampling strategy:
+    #   "complement" — context = every non-target patch (efficient, simplified)
+    #   "block"      — paper-faithful: sample one large context block, then
+    #                  subtract the target blocks that fall inside it.
+    context_strategy = config.get("context_strategy", "complement")
+    assert context_strategy in ("complement", "block"), \
+        f"context_strategy must be 'complement' or 'block', got '{context_strategy}'"
+    context_scale = tuple(config.get("context_scale", [0.85, 1.0]))
+    context_aspect_ratio = tuple(config.get("context_aspect_ratio", [1.0, 1.0]))
+
+    def build_context_mask(target_mask_input, h_p, w_p):
+        """Context positions to KEEP, per the configured strategy."""
+        if context_strategy == "block":
+            return generate_context_mask(
+                target_mask_input, h_p, w_p,
+                context_scale=context_scale,
+                context_aspect_ratio=context_aspect_ratio,
+                device=device,
+            )
+        return ~target_mask_input  # complement
 
     # ---- Resume ----
     start_epoch = 0
@@ -455,9 +535,13 @@ def main():
 
     print(f"Backbone: {backbone} | blocks: {dino_version} | embed={embed_dim} depth={depth} "
           f"heads={num_heads} patch={patch_size}")
-    print(f"Predictor: dim={predictor_dim} depth={predictor_depth} heads={predictor_num_heads}")
+    pred_mask_kind = "per-position (learnable_full)" if predictor.mask_token.shape[1] > 1 else "shared (single token)"
+    print(f"Predictor: dim={predictor_dim} depth={predictor_depth} heads={predictor_num_heads} | mask={pred_mask_kind}")
     print(f"Masking: {num_target_blocks} target blocks, scale={target_scale}, "
           f"aspect_ratio={target_aspect_ratio}")
+    print("Context: strategy=" + context_strategy
+          + (f", scale={context_scale}, aspect_ratio={context_aspect_ratio}"
+             if context_strategy == "block" else ""))
     print(f"Batch: {config['batch_size']} × {grad_accum_steps} accum | "
           f"downsample={downsample_factor}×")
     print(f"Training: epochs {start_epoch}..{config['epochs'] - 1} | {niter_per_ep} iters/ep")
@@ -507,10 +591,15 @@ def main():
                 # Target encoder: full image, no masking → ground truth representations
                 with torch.no_grad():
                     t_feats = teacher.forward_features(imgs, channel_ids, mask=None)
-                    target_reps = t_feats["patch_tokens"][target_mask_output]  # (num_targets, D)
+                    # I-JEPA target normalization: non-affine LayerNorm over the
+                    # feature dim of the target-encoder output. This is a core
+                    # part of I-JEPA that prevents representation collapse.
+                    target_tokens = F.layer_norm(
+                        t_feats["patch_tokens"], (t_feats["patch_tokens"].size(-1),))
+                    target_reps = target_tokens[target_mask_output]  # (num_targets, D)
 
                 # Context encoder: only process context (unmasked) patches
-                context_mask = ~target_mask_input  # True = keep
+                context_mask = build_context_mask(target_mask_input, h_p, w_p)  # True = keep
                 s_feats = student.forward_features_context(imgs, channel_ids, context_mask=context_mask)
 
                 # Predictor: reconstruct full grid → predict target representations
@@ -578,9 +667,11 @@ def main():
 
                 with torch.amp.autocast("cuda", dtype=autocast_dtype):
                     t_feats = teacher.forward_features(imgs, channel_ids, mask=None)
-                    target_reps = t_feats["patch_tokens"][target_mask_output]
+                    target_tokens = F.layer_norm(
+                        t_feats["patch_tokens"], (t_feats["patch_tokens"].size(-1),))
+                    target_reps = target_tokens[target_mask_output]
 
-                    context_mask = ~target_mask_input
+                    context_mask = build_context_mask(target_mask_input, h_p, w_p)
                     s_feats = student.forward_features_context(imgs, channel_ids, context_mask=context_mask)
                     predictions = predictor(
                         s_feats["context_tokens"],

@@ -311,15 +311,25 @@ class ImmuKRONOS(nn.Module):
             if ibot_out_dim is not None else None
         )
 
-        # 5. Mask token for iBOT
+        # 5. Mask token for iBOT / I-JEPA
+        # Maximum patch-grid positions supported by a per-position ("full") mask.
+        # ViT pos_embed holds 1024 patch slots; spatial backbones mask at the
+        # hyperkernel-output resolution which stays <= this for supported crops.
+        self.max_mask_positions = 1024
         if mask_strategy == "learnable":
+            # Single shared learnable mask token, broadcast to every masked slot.
             self.mask_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
+        elif mask_strategy == "learnable_full":
+            # Full per-position learnable mask: one distinct token per patch slot.
+            self.mask_token = nn.Parameter(torch.zeros(1, self.max_mask_positions, embed_dim))
         elif mask_strategy == "zero":
             self.register_buffer("mask_token", torch.zeros(1, 1, embed_dim))
         elif mask_strategy == "negative":
             self.register_buffer("mask_token", torch.full((1, 1, embed_dim), -1.0))
         else:
-            raise ValueError(f"Unknown mask_strategy: {mask_strategy}")
+            raise ValueError(
+                f"Unknown mask_strategy: {mask_strategy}. "
+                f"Use 'zero', 'negative', 'learnable', or 'learnable_full'.")
 
         self._init_weights()
 
@@ -392,7 +402,7 @@ class ImmuKRONOS(nn.Module):
             nn.init.normal_(self.cls_token, std=1e-6)
         if hasattr(self, 'pos_embed'):
             nn.init.normal_(self.pos_embed, std=0.02)
-        if self.mask_strategy == "learnable":
+        if self.mask_strategy in ("learnable", "learnable_full"):
             nn.init.normal_(self.mask_token, std=0.02)
         if hasattr(self, 'register_tokens') and self.register_tokens is not None:
             nn.init.normal_(self.register_tokens, std=1e-6)
@@ -438,8 +448,15 @@ class ImmuKRONOS(nn.Module):
 
         # Apply iBOT mask
         if mask is not None:
-            mask_val = self.mask_token.squeeze(0).squeeze(0).to(x_enc.dtype)
-            x_enc = torch.where(mask.unsqueeze(-1), mask_val.unsqueeze(0).unsqueeze(0).expand_as(x_enc), x_enc)
+            if self.mask_strategy == "learnable_full":
+                # Per-position learnable mask tokens (1, N, D), one per patch slot.
+                mask_tokens = self.mask_token[:, :x_enc.shape[1], :].to(x_enc.dtype)
+                x_enc = torch.where(
+                    mask.unsqueeze(-1),
+                    mask_tokens.expand(x_enc.shape[0], -1, -1), x_enc)
+            else:
+                mask_val = self.mask_token.squeeze(0).squeeze(0).to(x_enc.dtype)
+                x_enc = torch.where(mask.unsqueeze(-1), mask_val.unsqueeze(0).unsqueeze(0).expand_as(x_enc), x_enc)
 
         # CLS token
         cls = self.cls_token.expand(B, -1, -1)
@@ -495,16 +512,32 @@ class ImmuKRONOS(nn.Module):
             x_enc = self.hyperkernel(x, channel_ids)
 
         if self._is_spatial_backbone:
-            # Spatial backbones need full grid — can't drop tokens, fall back
-            # to mask-token substitution but return I-JEPA-compatible format.
+            # Convolution / window attention needs the full grid, so target
+            # patches cannot be *dropped* — they are replaced by the mask token
+            # at the input resolution (MAE-style). To keep this a genuine I-JEPA
+            # objective, we then hand the predictor ONLY the true context tokens
+            # (mapped to the possibly-downsampled output grid) so that target
+            # positions are reconstructed from the predictor's own mask token
+            # rather than from encoder features computed at those positions.
             feats = self._forward_spatial(x_enc, h_p, w_p, ~context_mask)
             patch_tokens = feats["patch_tokens"]  # (B, N_out, D)
             N_out = patch_tokens.shape[1]
-            # All positions are "context" from the perspective of the predictor
+            h_out = w_out = int(round(math.sqrt(N_out)))
+            ctx_out = self._downsample_context_mask(context_mask, h_p, w_p, h_out, w_out)
+
+            n_ctx = ctx_out.sum(dim=1)  # (B,)
+            max_ctx = int(n_ctx.max().item())
+            context_tokens = torch.zeros(B, max_ctx, patch_tokens.shape[-1],
+                                         device=patch_tokens.device, dtype=patch_tokens.dtype)
+            context_indices = torch.zeros(B, max_ctx, device=patch_tokens.device, dtype=torch.long)
+            for i in range(B):
+                idx = ctx_out[i].nonzero(as_tuple=True)[0]
+                context_tokens[i, :len(idx)] = patch_tokens[i, idx]
+                context_indices[i, :len(idx)] = idx
             return {
-                "context_tokens": patch_tokens,
-                "context_indices": torch.arange(N_out, device=patch_tokens.device).unsqueeze(0).expand(B, -1),
-                "n_ctx": torch.full((B,), N_out, device=patch_tokens.device, dtype=torch.long),
+                "context_tokens": context_tokens,      # (B, N_ctx, D)
+                "context_indices": context_indices,    # (B, N_ctx)
+                "n_ctx": n_ctx,                         # (B,) actual counts
             }
 
         # ViT path — drop target tokens for efficiency
@@ -562,6 +595,24 @@ class ImmuKRONOS(nn.Module):
             "n_ctx": n_ctx,                            # (B,) actual counts
         }
 
+    def _downsample_context_mask(self, context_mask, h_in, w_in, h_out, w_out):
+        """Map an input-resolution context mask onto a downsampled output grid.
+
+        An output cell counts as *context* only if EVERY input patch that maps
+        into it is context (no target overlap). Equivalent to the complement of
+        max-pooling the target mask, which keeps it consistent with the
+        `downsample_mask` (max-pool) used to build the target mask in the loop.
+        """
+        if h_in == h_out and w_in == w_out:
+            return context_mask
+        B = context_mask.shape[0]
+        target_2d = (~context_mask).float().reshape(B, 1, h_in, w_in)
+        pool_h = h_in // h_out
+        pool_w = w_in // w_out
+        target_out = F.max_pool2d(target_2d, kernel_size=(pool_h, pool_w),
+                                  stride=(pool_h, pool_w))
+        return ~(target_out.reshape(B, -1).bool())
+
     def _forward_spatial(self, x_enc, h_p, w_p, mask):
         """ConvNeXt / Swin backbone forward — spatial feature maps."""
         # x_enc: (B, D, h_p, w_p)
@@ -570,8 +621,13 @@ class ImmuKRONOS(nn.Module):
         if mask is not None:
             B, D, H, W = x_enc.shape
             mask_2d = mask.reshape(B, 1, H, W).float()
-            mask_val = self.mask_token.squeeze(0).transpose(0, 1).unsqueeze(-1)  # (1, D, 1)
-            mask_val = mask_val.unsqueeze(-1).expand_as(x_enc)  # (1, D, H, W)
+            if self.mask_strategy == "learnable_full":
+                # Per-position learnable mask tokens reshaped to the patch grid.
+                mt = self.mask_token[:, :H * W, :].to(x_enc.dtype)  # (1, H*W, D)
+                mask_val = mt.transpose(1, 2).reshape(1, D, H, W)   # (1, D, H, W)
+            else:
+                mask_val = self.mask_token.squeeze(0).transpose(0, 1).unsqueeze(-1)  # (1, D, 1)
+                mask_val = mask_val.unsqueeze(-1).expand_as(x_enc)  # (1, D, H, W)
             x_enc = x_enc * (1 - mask_2d) + mask_val * mask_2d
 
         # Pass through spatial backbone (returns dict with "output" key)
